@@ -84,13 +84,13 @@
 
 ## 10. 健康、备份与部署
 
-- [ ] 10.1 实现结构化脱敏日志和健康快照，覆盖 commit/config/schema/clock/provider/socket/credits/window/funnel/outbox/Outcome/SQLite/disk/Telegram。
-- [ ] 10.2 实现 safety、Level 1、G2、credits、Telegram、SQLite、时钟和磁盘的保守降级与恢复状态机。
-- [ ] 10.3 实现 SQLite 定时备份、恢复校验、配置化保留和磁盘水位；完全不可写时健康失败并输出 stderr，而不依赖 Outbox。
-- [ ] 10.4 创建最小 Dockerfile、Docker Compose、持久化卷、`.env.example` 和 secrets/DB/WAL/log/backup gitignore。
-- [ ] 10.5 创建 GitHub Actions，执行 npm ci、lint、typecheck、test、build 和 Docker smoke。
-- [ ] 10.6 创建简短 deploy.sh：dirty 检查、ff-only pull、Compose rebuild/start、健康检查；不得包含服务器代码/配置修改逻辑。
-- [ ] 10.7 创建版本化 replay/report wrapper，限定 clean main 容器运行并只通过 repository 写允许的表。
+- [x] 10.1 实现结构化脱敏日志和健康快照，覆盖 commit/config/schema/clock/provider/socket/credits/window/funnel/outbox/Outcome/SQLite/disk/Telegram。
+- [x] 10.2 实现 safety、Level 1、G2、credits、Telegram、SQLite、时钟和磁盘的保守降级与恢复状态机。
+- [x] 10.3 实现 SQLite 定时备份、恢复校验、配置化保留和磁盘水位；完全不可写时健康失败并输出 stderr，而不依赖 Outbox。
+- [x] 10.4 创建最小 Dockerfile、Docker Compose、持久化卷、`.env.example` 和 secrets/DB/WAL/log/backup gitignore。
+- [x] 10.5 创建 GitHub Actions，执行 npm ci、lint、typecheck、test、build 和 Docker smoke。
+- [x] 10.6 创建简短 deploy.sh：dirty 检查、ff-only pull、Compose rebuild/start、健康检查；不得包含服务器代码/配置修改逻辑。
+- [x] 10.7 创建版本化 replay/report wrapper，限定 clean main 容器运行并只通过 repository 写允许的表。
 
 ## 11. 实施验收与 Shadow 就绪
 

@@ -1,0 +1,20 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      CONTAINERIZED_RUN: ${CONTAINERIZED_RUN:-0}
+      BUILD_GIT_COMMIT: ${BUILD_GIT_COMMIT:-unknown}
+      BUILD_WORKTREE_STATUS: ${BUILD_WORKTREE_STATUS:-unknown}
+    volumes:
+      - bot-data:/app/data
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp
+
+volumes:
+  bot-data:

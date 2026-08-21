@@ -10,6 +10,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/copy-migrations.mjs",
     "config:validate": "node --import tsx src/app/validate-config.ts",
+    "health:check": "node --import tsx src/app/healthcheck.ts",
+    "replay:report": "node scripts/replay-report.mjs",
     "provider:contract": "node --import tsx src/providers/contract-check.ts",
     "format": "prettier --write package.json tsconfig.json tsconfig.build.json eslint.config.mjs .prettierrc.json config src",
     "format:check": "prettier --check package.json tsconfig.json tsconfig.build.json eslint.config.mjs .prettierrc.json config src",

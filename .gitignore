@@ -26,6 +26,7 @@ tmp/
 .tmp/
 
 # Local databases, WAL/SHM files, and generated provider/preflight output.
+data/
 *.sqlite
 *.sqlite-*
 *.db

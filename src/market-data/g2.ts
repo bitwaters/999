@@ -167,9 +167,16 @@ export function aggregateG2Window(
   );
   let buy = new Decimal(0);
   let sell = new Decimal(0);
+  let invalidNumeric = false;
   const buyVolumes: Decimal[] = [];
   for (const trade of inWindow) {
-    const amount = parseDecimalString(trade.quoteAmount, { nonNegative: true });
+    let amount: Decimal;
+    try {
+      amount = parseDecimalString(trade.quoteAmount, { nonNegative: true });
+    } catch {
+      invalidNumeric = true;
+      continue;
+    }
     if (trade.targetSide === 'buy') {
       buy = buy.plus(amount);
       buyVolumes.push(amount);
@@ -177,7 +184,7 @@ export function aggregateG2Window(
   }
   const total = buy.plus(sell);
   const status =
-    ambiguousCount > 0
+    ambiguousCount > 0 || invalidNumeric
       ? 'incomplete'
       : observedAt < windowEnd
         ? 'partial'

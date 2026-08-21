@@ -97,6 +97,19 @@ test('G2 window aggregates net buy, share and concentration without using duplic
   assert.equal(window.top1BuyShare, '1');
 });
 
+test('G2 window fail-closes malformed persisted decimals without crashing the runtime', () => {
+  const parsed = normalizeG2Item(raw('buy'), pool, 1_100);
+  assert.equal(parsed.status, 'complete');
+  if (parsed.status !== 'complete') return;
+  const window = aggregateG2Window(
+    [{ ...parsed.trade, quoteAmount: 'not-a-decimal' }],
+    0,
+    2_000,
+    2_000,
+  );
+  assert.equal(window.status, 'incomplete');
+});
+
 test('G2 subscription manager is Armed-only and reconnects desired subscriptions', () => {
   const manager = new G2SubscriptionManager(1);
   assert.equal(manager.request(pool, 'confirmed-pending-anchor'), 'rejected_capacity');

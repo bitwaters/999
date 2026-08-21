@@ -26,6 +26,7 @@ import { readDiskHealth } from '../runtime/health.js';
 import { evaluateBscSafety, evaluateSolSafety, type SafetyResult } from '../domain/safety.js';
 import { parsePool, selectPrimaryPool, type CanonicalPool } from '../market-data/pools.js';
 import { assertAnalystEndpoint } from '../providers/http.js';
+import { parseDecimalString } from '../providers/parsing.js';
 import {
   latestTradeAt,
   level1RawForPool,
@@ -75,6 +76,8 @@ export type ProviderProbeStatus = {
   level1: ProbeState;
   g2: ProbeState;
   telegram: ProbeState;
+  g2QueueSize: number;
+  g2QueueHighWater: boolean;
   lastProbeAt?: number;
   lastError?: string;
 };
@@ -391,6 +394,8 @@ export class ProviderProbe {
       level1: this.level1,
       g2: g2ProbeState(this.g2Client?.status(), this.g2QueueIncomplete),
       telegram: this.telegram,
+      g2QueueSize: this.g2Queue.size(),
+      g2QueueHighWater: this.g2Queue.atHighWatermark(),
       ...(this.lastProbeAt === undefined ? {} : { lastProbeAt: this.lastProbeAt }),
       ...(this.lastError === undefined ? {} : { lastError: this.lastError }),
     };
@@ -2231,6 +2236,13 @@ function readNormalizedTrades(
       !Number.isSafeInteger(row.item_index)
     )
       return [];
+    try {
+      parseDecimalString(row.token_amount, { nonNegative: true });
+      parseDecimalString(row.quote_amount, { nonNegative: true });
+      parseDecimalString(row.price_usd, { nonNegative: true });
+    } catch {
+      return [];
+    }
     const fingerprint = [
       row.chain,
       row.pool_address,

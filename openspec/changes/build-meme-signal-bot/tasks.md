@@ -98,6 +98,6 @@
 - [x] 11.2 执行全量 lint/typecheck/test/build、migration from empty、Docker smoke、重启恢复、备份恢复和 deploy dirty guard 验收。（本地全量与 Docker smoke 已通过）
 - [ ] 11.3 使用私人 GMGN Key 固化 SOL/BSC 脱敏 fixture，并验证 RPM、并发、reset、封禁、BSC ownership/open-source/tax 与比例量纲。（接口深测 52/52、受控 2 路并发及 5.2 秒 pacing 4 次均通过；未主动触发压力封禁，RPM 上限与 reset 边界仍待专门验收）
 - [x] 11.4 实测 CoinGecko G2 quote、多 leg、重复、乱序、重连、每 socket/并发上限、rolling credits per message 和 50 池尾延迟。（按池列表 m5 活跃度选择合同测试池后，真实合同验收 34/34；GMGN 52/52）
-- [ ] 11.5 在服务器以 Shadow/admin anchor 部署，持续采集并验证完整率、索引延迟、可执行率、Outcome、credits、磁盘与 replay 让步。（本地 Compose 已具备独立原始采样服务，但仓库尚无正式长期 Signal/Outcome Bot runtime；SSH 可达，但服务器未提供本项目仓库/Compose/部署路径，未执行任何远端写入）
+- [ ] 11.5 在服务器以 Shadow/admin anchor 部署，持续采集并验证完整率、索引延迟、可执行率、Outcome、credits、磁盘与 replay 让步。（本地已接入 Signal/ENTRY runtime 与独立原始采样服务，但锚点后的 Outcome/candle 长期 worker 尚未完成；SSH 可达，但服务器未提供本项目仓库/Compose/部署路径，未执行任何远端写入）
 - [ ] 11.6 基于累计样本完成训练/最近验证切片、参数敏感性、预算模拟和 S1 风险政策人工评审；未通过前保持 Shadow。（只读评审已固化：总样本 145 calls，最近 5 分钟 GMGN 35/0 失败但 BSC indexing 7/300，累计 GMGN 16/84 失败、BSC indexing 8.7%、credits 4 个采样点；无 Outcome 标签，参数敏感性不可估计，S1 全部关闭，结论为 `hold_shadow`）
 - [ ] 11.7 production 配置经本地修改、main/CI 和服务器拉取部署后，核对 commit/config hash/schema/锚点/健康并记录放行结果。（本地未配置 `origin`，服务器未提供本项目仓库/Compose 路径，尚不能执行真实部署）

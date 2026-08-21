@@ -46,6 +46,7 @@ const deliveryWorker = new TelegramDeliveryWorker({
   },
   logger: (level, event, fields) =>
     console.error(JSON.stringify({ level, event, ...fields, at: Date.now() })),
+  beforeSend: (row, now) => providerProbe.dispatchGuardForOutbox(row, now),
 });
 const runtime = new BotRuntime({
   loaded,

@@ -26,14 +26,18 @@ import {
 } from '../providers/coingecko-adapter.js';
 import { isLevel1Fresh, parseLevel1Snapshot, type Level1Snapshot } from '../market-data/level1.js';
 import { CoinGeckoG2Client } from '../providers/coingecko-g2.js';
-import { evaluateAttention } from '../pipeline/ace.js';
+import { evaluateAttention, evaluateDispatchGuard, type SignalSnapshot } from '../pipeline/ace.js';
+import { createLiveSignal } from './live-signal.js';
 import {
+  aggregateG2Window,
   G2IngestQueue,
   TradeDeduper,
   hashG2Message,
   normalizeG2Item,
+  type NormalizedTrade,
   type RawG2Item,
 } from '../market-data/g2.js';
+import type { OutboxRow } from '../delivery/outbox.js';
 
 type ProbeState = 'ok' | 'failed' | 'unknown';
 type ProbeLogger = (
@@ -76,6 +80,7 @@ export class ProviderProbe {
   private safety: ProbeState = 'unknown';
   private level1: ProbeState = 'unknown';
   private readonly level1Snapshots = new Map<string, Level1Snapshot>();
+  private readonly previousLevel1Snapshots = new Map<string, Level1Snapshot>();
   private readonly level1Pools = new Map<string, CanonicalPool>();
   private readonly g2Queue: G2IngestQueue<PendingG2>;
   private readonly g2Deduper = new TradeDeduper();
@@ -83,6 +88,7 @@ export class ProviderProbe {
   private g2DrainScheduled = false;
   private g2DrainInFlight: Promise<void> | undefined;
   private g2QueueIncomplete = false;
+  private readonly signalCheckTimers = new Map<string, NodeJS.Timeout>();
   private telegram: ProbeState = 'unknown';
   private lastProbeAt: number | undefined;
   private lastError: string | undefined;
@@ -132,6 +138,8 @@ export class ProviderProbe {
     this.stopping = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    for (const timer of this.signalCheckTimers.values()) clearTimeout(timer);
+    this.signalCheckTimers.clear();
     await this.inFlight;
     await this.g2DrainInFlight;
     await this.g2Client?.stop();
@@ -152,6 +160,74 @@ export class ProviderProbe {
       ...(this.lastProbeAt === undefined ? {} : { lastProbeAt: this.lastProbeAt }),
       ...(this.lastError === undefined ? {} : { lastError: this.lastError }),
     };
+  }
+
+  public dispatchGuardForOutbox(
+    row: OutboxRow,
+    now: number,
+  ):
+    | { status: 'send' }
+    | { status: 'defer'; reason: string; dueAt?: number }
+    | { status: 'cancel'; reason: string } {
+    if (row.messageType !== 'ENTRY_SIGNAL' || row.signalId === undefined) return { status: 'send' };
+    const record = this.options.database
+      .prepare(
+        `SELECT signals.snapshot_json, candidates.chain, candidates.token_address, candidates.pool_address,
+                candidates.safety_json
+         FROM signals JOIN candidates ON candidates.id = signals.candidate_id
+         WHERE signals.id = ?`,
+      )
+      .get(row.signalId) as
+      | {
+          snapshot_json: string;
+          chain: 'sol' | 'bsc';
+          token_address: string;
+          pool_address: string | null;
+          safety_json: string | null;
+        }
+      | undefined;
+    if (!record?.pool_address || !record.safety_json)
+      return { status: 'defer', reason: 'dispatch:missing_signal_evidence' };
+    const signal = parseSignalSnapshot(record.snapshot_json);
+    const safety = parseSafety(record.safety_json);
+    const pool = this.level1Pools.get(
+      `${record.chain}:${record.pool_address}:${record.token_address}`,
+    );
+    const level1 = pool ? this.level1Snapshots.get(pool.identityKey) : undefined;
+    if (!signal || !safety || !pool || !level1)
+      return { status: 'defer', reason: 'dispatch:runtime_evidence_unavailable' };
+    const windowEnd = Math.floor(signal.confirmedAt / 30_000) * 30_000;
+    const g2 = aggregateG2Window(
+      readNormalizedTrades(
+        this.options.database,
+        { chain: record.chain, poolAddress: pool.poolAddress, tokenAddress: pool.tokenAddress },
+        windowEnd - 30_000,
+        windowEnd,
+      ),
+      windowEnd - 30_000,
+      windowEnd,
+      now,
+    );
+    const guard = evaluateDispatchGuard({
+      signal,
+      now,
+      safety,
+      latestPoolStable: level1.poolStatus === 'stable',
+      latestPoolFresh: isLevel1Fresh(
+        level1,
+        now,
+        this.options.config.chains[record.chain].level1.buyers_freshness_seconds,
+      ),
+      latestG2State: g2.status,
+      latestPriceUsd: level1.priceUsd,
+      maxPreSendDrift: String(
+        this.options.config.strategies.emerging_breakout.entry_quality.max_pre_send_drift,
+      ),
+    });
+    if (guard.status === 'send') return guard;
+    if (guard.reason === 'expired:entry_ttl' || guard.reason === 'pre_send_drift:overextended')
+      return { status: 'cancel', reason: guard.reason };
+    return { status: 'defer', reason: guard.reason };
   }
 
   public onStatusChange(listener: () => void): void {
@@ -370,8 +446,13 @@ export class ProviderProbe {
         } else {
           const info = this.options.database
             .prepare(
-              `UPDATE candidates SET last_seen_at = ?, status = ?, safety_status = ?, safety_json = ?,
-               funnel_status = 'safety_checked', updated_at = ? WHERE id = ?`,
+              `UPDATE candidates SET last_seen_at = ?,
+               status = CASE WHEN status IN ('armed', 'confirmed-pending-anchor', 'delivered', 'completed')
+                             THEN status ELSE ? END,
+               safety_status = ?, safety_json = ?,
+               funnel_status = CASE WHEN funnel_status IN ('armed', 'confirmed-pending-anchor', 'delivered', 'completed')
+                                    THEN funnel_status ELSE 'safety_checked' END,
+               updated_at = ? WHERE id = ?`,
             )
             .run(
               cycle.lastSeenAt,
@@ -577,6 +658,8 @@ export class ProviderProbe {
         );
         if (level1.status !== 'complete') continue;
         complete += 1;
+        const previous = this.level1Snapshots.get(parsedPool.pool.identityKey);
+        if (previous) this.previousLevel1Snapshots.set(parsedPool.pool.identityKey, previous);
         this.level1Snapshots.set(parsedPool.pool.identityKey, level1.snapshot);
         this.level1Pools.set(`${chain}:${row.pool_address}:${row.token_address}`, parsedPool.pool);
         boundedWrite(this.options.database, this.options.writeBudget, (context) => {
@@ -721,7 +804,7 @@ export class ProviderProbe {
         continue;
       }
       const deduped = this.g2Deduper.ingest(hashG2Message(item.value.raw), [parsed.trade]);
-      for (const trade of deduped.trades)
+      for (const trade of deduped.trades) {
         boundedWrite(this.options.database, this.options.writeBudget, (context) => {
           const info = this.options.database
             .prepare(
@@ -757,7 +840,119 @@ export class ProviderProbe {
             );
           context.addRows(info.changes);
         });
+        this.tryCreateLiveSignal(trade);
+      }
     }
+  }
+
+  private tryCreateLiveSignal(trade: NormalizedTrade): void {
+    const candidate = this.options.database
+      .prepare(
+        `SELECT id, cycle_started_at, safety_json FROM candidates
+         WHERE chain = ? AND token_address = ? AND pool_address = ?
+           AND status = 'armed' AND safety_status = 'pass'
+         ORDER BY updated_at DESC LIMIT 1`,
+      )
+      .get(trade.chain, trade.tokenAddress, trade.poolAddress) as
+      { id: number; cycle_started_at: number; safety_json: string | null } | undefined;
+    if (!candidate?.safety_json) return;
+    const cycle = this.trackers[trade.chain].get(trade.chain, trade.tokenAddress);
+    const pool = [...this.level1Pools.values()].find(
+      (item) =>
+        item.chain === trade.chain &&
+        item.tokenAddress === trade.tokenAddress &&
+        item.poolAddress === trade.poolAddress,
+    );
+    if (!cycle || !pool) return;
+    const level1 = this.level1Snapshots.get(pool.identityKey);
+    if (!level1) return;
+    const now = Date.now();
+    const windowEnd = Math.floor(now / 30_000) * 30_000;
+    if (trade.eventAt >= windowEnd) {
+      this.scheduleSignalCheck(trade, windowEnd + 100);
+      return;
+    }
+    const windowStart = windowEnd - 30_000;
+    const g2 = aggregateG2Window(
+      readNormalizedTrades(this.options.database, trade, windowStart, windowEnd),
+      windowStart,
+      windowEnd,
+      windowEnd,
+    );
+    const safety = parseSafety(candidate.safety_json);
+    if (!safety) return;
+    const anchorCooldownUntil = this.findAnchorCooldown(trade.chain, trade.tokenAddress, now);
+    let result;
+    try {
+      result = createLiveSignal({
+        config: this.options.config,
+        database: this.options.database,
+        writeBudget: this.options.writeBudget,
+        configVersionId: this.options.configVersionId,
+        candidateId: candidate.id,
+        cycle,
+        safety,
+        pool,
+        level1,
+        ...(this.previousLevel1Snapshots.has(pool.identityKey)
+          ? { previousLevel1: this.previousLevel1Snapshots.get(pool.identityKey)! }
+          : {}),
+        g2,
+        attention: evaluateAttention(
+          attentionInput(cycle.evidence),
+          this.options.config.strategies.emerging_breakout.attention,
+        ),
+        confirmedAt: now,
+        ...(anchorCooldownUntil === undefined ? {} : { anchorCooldownUntil }),
+      });
+    } catch (error) {
+      this.options.logger('error', 'live_signal_evaluation_failed', {
+        chain: trade.chain,
+        pool_address: trade.poolAddress,
+        error: this.safeError(error),
+      });
+      return;
+    }
+    if (result.status !== 'created') return;
+    this.g2Client?.request(pool, 'confirmed-pending-anchor');
+    this.options.logger('info', 'signal_created', {
+      signal_id: result.signalId,
+      candidate_id: candidate.id,
+      chain: trade.chain,
+      pool_address: trade.poolAddress,
+    });
+  }
+
+  private scheduleSignalCheck(trade: NormalizedTrade, at: number): void {
+    const key = `${trade.chain}:${trade.poolAddress}:${trade.tokenAddress}:${at}`;
+    if (this.signalCheckTimers.has(key)) return;
+    const timer = setTimeout(
+      () => {
+        this.signalCheckTimers.delete(key);
+        this.tryCreateLiveSignal(trade);
+      },
+      Math.max(1, at - Date.now()),
+    );
+    this.signalCheckTimers.set(key, timer);
+  }
+
+  private findAnchorCooldown(
+    chain: 'sol' | 'bsc',
+    tokenAddress: string,
+    now: number,
+  ): number | undefined {
+    const row = this.options.database
+      .prepare(
+        `SELECT signals.confirmed_at FROM signals
+         JOIN candidates ON candidates.id = signals.candidate_id
+         WHERE candidates.chain = ? AND candidates.token_address = ?
+         ORDER BY signals.confirmed_at DESC LIMIT 1`,
+      )
+      .get(chain, tokenAddress) as { confirmed_at: number } | undefined;
+    if (!row) return undefined;
+    const until =
+      row.confirmed_at + this.options.config.strategies.emerging_breakout.cooldown_seconds * 1000;
+    return until > now ? until : undefined;
   }
 
   private markG2Incomplete(reason: string): void {
@@ -993,6 +1188,135 @@ function attentionInput(evidence: readonly DiscoveryObservation[]): {
         ...(previous.rank === undefined ? {} : { rankBefore: previous.rank }),
         ...(latest.rank === undefined ? {} : { rankAfter: latest.rank }),
       };
+}
+
+function parseSafety(value: string): SafetyResult | undefined {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+    const record = parsed as Record<string, unknown>;
+    if (
+      record.status !== 'pass' &&
+      record.status !== 'fatal' &&
+      record.status !== 'policy_reject' &&
+      record.status !== 'incomplete'
+    )
+      return undefined;
+    if (
+      !Array.isArray(record.reasons) ||
+      !record.reasons.every((reason) => typeof reason === 'string') ||
+      !Number.isSafeInteger(record.checkedAt) ||
+      !Number.isSafeInteger(record.expiresAt) ||
+      typeof record.providerEventId !== 'string' ||
+      typeof record.configVersionId !== 'string' ||
+      !record.canonical ||
+      typeof record.canonical !== 'object' ||
+      Array.isArray(record.canonical)
+    )
+      return undefined;
+    return record as unknown as SafetyResult;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseSignalSnapshot(value: string): SignalSnapshot | undefined {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+    const record = parsed as Record<string, unknown>;
+    if (
+      record.signalType !== 'Emerging Breakout' ||
+      (record.chain !== 'sol' && record.chain !== 'bsc') ||
+      typeof record.candidateKey !== 'string' ||
+      typeof record.tokenAddress !== 'string' ||
+      typeof record.poolAddress !== 'string' ||
+      typeof record.configVersionId !== 'string' ||
+      typeof record.confirmationPriceUsd !== 'string' ||
+      !Number.isSafeInteger(record.cycleStartedAt) ||
+      !Number.isSafeInteger(record.confirmedAt) ||
+      !Number.isSafeInteger(record.expiresAt)
+    )
+      return undefined;
+    return record as unknown as SignalSnapshot;
+  } catch {
+    return undefined;
+  }
+}
+
+function readNormalizedTrades(
+  database: SqliteDatabase,
+  identity: Pick<NormalizedTrade, 'chain' | 'poolAddress' | 'tokenAddress'>,
+  windowStart: number,
+  windowEnd: number,
+): NormalizedTrade[] {
+  const rows = database
+    .prepare(
+      `SELECT chain, pool_address, token_address, raw_side, target_side, token_amount, quote_amount,
+              price_usd, event_at, observed_at, tx_hash, provider_trade_id, log_index, leg_index,
+              item_index, identity_key, dedup_status, ambiguity_status
+       FROM trades
+       WHERE chain = ? AND pool_address = ? AND token_address = ?
+         AND event_at >= ? AND event_at < ? AND observed_at <= ?
+       ORDER BY event_at ASC, observed_at ASC, id ASC`,
+    )
+    .all(
+      identity.chain,
+      identity.poolAddress,
+      identity.tokenAddress,
+      windowStart,
+      windowEnd,
+      windowEnd,
+    ) as Array<Record<string, unknown>>;
+  return rows.flatMap((row) => {
+    if (
+      (row.raw_side !== 'buy' && row.raw_side !== 'sell') ||
+      (row.target_side !== 'buy' && row.target_side !== 'sell') ||
+      (row.dedup_status !== 'unique' && row.dedup_status !== 'duplicate') ||
+      (row.ambiguity_status !== 'none' && row.ambiguity_status !== 'ambiguous') ||
+      typeof row.token_amount !== 'string' ||
+      typeof row.quote_amount !== 'string' ||
+      typeof row.price_usd !== 'string' ||
+      !Number.isSafeInteger(row.event_at) ||
+      !Number.isSafeInteger(row.observed_at) ||
+      !Number.isSafeInteger(row.item_index)
+    )
+      return [];
+    const fingerprint = [
+      row.chain,
+      row.pool_address,
+      row.raw_side,
+      row.event_at,
+      row.token_amount,
+      row.quote_amount,
+      row.item_index,
+    ].join('|');
+    return [
+      {
+        chain: row.chain as 'sol' | 'bsc',
+        poolAddress: String(row.pool_address),
+        tokenAddress: String(row.token_address),
+        rawSide: row.raw_side,
+        targetSide: row.target_side,
+        tokenAmount: row.token_amount,
+        quoteAmount: row.quote_amount,
+        priceUsd: row.price_usd,
+        eventAt: row.event_at,
+        observedAt: row.observed_at,
+        ...(typeof row.provider_trade_id === 'string'
+          ? { providerTradeId: row.provider_trade_id }
+          : {}),
+        ...(typeof row.tx_hash === 'string' ? { txHash: row.tx_hash } : {}),
+        ...(Number.isSafeInteger(row.log_index) ? { logIndex: row.log_index } : {}),
+        ...(Number.isSafeInteger(row.leg_index) ? { legIndex: row.leg_index } : {}),
+        itemIndex: row.item_index,
+        ...(typeof row.identity_key === 'string' ? { identityKey: row.identity_key } : {}),
+        dedupStatus: row.dedup_status,
+        ambiguityStatus: row.ambiguity_status,
+        fingerprint,
+      } as NormalizedTrade,
+    ];
+  });
 }
 
 function dedupePools(

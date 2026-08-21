@@ -30,6 +30,13 @@ export type DeliveryWorkerOptions = {
   writeBudget: WriteBudget;
   logger: DeliveryLogger;
   pollIntervalMs?: number;
+  beforeSend?: (
+    row: OutboxRow,
+    now: number,
+  ) =>
+    | { status: 'send' }
+    | { status: 'defer'; reason: string; dueAt?: number }
+    | { status: 'cancel'; reason: string };
 };
 
 export class TelegramDeliveryWorker {
@@ -100,6 +107,42 @@ export class TelegramDeliveryWorker {
 
   private async sendOne(id: number, row: OutboxRow): Promise<void> {
     const now = Date.now();
+    if (row.messageType === 'ENTRY_SIGNAL' && this.options.beforeSend) {
+      let decision:
+        | { status: 'send' }
+        | { status: 'defer'; reason: string; dueAt?: number }
+        | { status: 'cancel'; reason: string };
+      try {
+        decision = this.options.beforeSend(row, now);
+      } catch (error) {
+        decision = {
+          status: 'defer',
+          reason: `dispatch:guard_error:${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+      if (decision.status !== 'send') {
+        const expired =
+          row.expiresAt !== undefined && now >= row.expiresAt ? true : decision.status === 'cancel';
+        const next: OutboxRow = expired
+          ? { ...row, status: 'expired', lastError: `dispatch:${decision.reason}` }
+          : {
+              ...row,
+              status: 'pending',
+              dueAt:
+                decision.status === 'defer' && decision.dueAt !== undefined
+                  ? decision.dueAt
+                  : now + (this.options.pollIntervalMs ?? 1_000),
+              lastError: `dispatch:${decision.reason}`,
+            };
+        this.updateRow(next, id);
+        this.options.logger('warn', 'delivery_dispatch_guard', {
+          outbox_id: id,
+          status: next.status,
+          reason: decision.reason,
+        });
+        return;
+      }
+    }
     const sending = beginDelivery(row, now);
     this.updateRow(sending, id);
     if (sending.status === 'expired') return;

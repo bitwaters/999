@@ -220,3 +220,77 @@ export function insertSignalAndOutbox(
     return signalId;
   }).value;
 }
+
+export function insertSignalAndPolicies(
+  database: SqliteDatabase,
+  input: {
+    candidateId: number;
+    configVersionId: number;
+    confirmedAt: number;
+    snapshot: SignalSnapshot;
+    entryTtlSeconds: number;
+    now: number;
+    destinations: readonly EntryDestinationPolicy[];
+  },
+  budget: WriteBudget,
+): { status: 'ready'; signalId: number } | { status: 'blocked'; reason: string } {
+  const preview = createEntryOutboxRows({
+    signalId: 1,
+    confirmedAt: input.confirmedAt,
+    entryTtlSeconds: input.entryTtlSeconds,
+    now: input.now,
+    destinations: input.destinations,
+  });
+  if (preview.status === 'blocked') return preview;
+  const signalId = boundedWrite(database, budget, (context) => {
+    const signalInsert = database
+      .prepare(
+        `INSERT INTO signals (candidate_id, config_version_id, signal_type, confirmed_at, status, snapshot_json, created_at)
+         VALUES (?, ?, 'Emerging Breakout', ?, 'confirmed-pending-anchor', ?, ?)`,
+      )
+      .run(
+        input.candidateId,
+        input.configVersionId,
+        input.confirmedAt,
+        JSON.stringify(input.snapshot),
+        input.confirmedAt,
+      );
+    context.addRows(1);
+    const rows = createEntryOutboxRows({
+      signalId: Number(signalInsert.lastInsertRowid),
+      confirmedAt: input.confirmedAt,
+      entryTtlSeconds: input.entryTtlSeconds,
+      now: input.now,
+      destinations: input.destinations,
+    });
+    if (rows.status === 'blocked') throw new Error(`Outbox blocked: ${rows.reason}`);
+    const insertOutbox = database.prepare(
+      `INSERT OR IGNORE INTO delivery_outbox
+       (signal_id, destination, message_type, dedupe_key, status, rendered_payload, expires_at, attempts, due_at, delivery_uncertain)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const row of rows.rows)
+      insertOutbox.run(
+        Number(signalInsert.lastInsertRowid),
+        row.destination,
+        row.messageType,
+        row.dedupeKey,
+        row.status,
+        row.renderedPayload,
+        row.expiresAt ?? null,
+        row.attempts,
+        row.dueAt,
+        row.deliveryUncertain ? 1 : 0,
+      );
+    context.addRows(rows.rows.length);
+    const candidateUpdate = database
+      .prepare(
+        `UPDATE candidates SET status = 'confirmed-pending-anchor', funnel_status = 'confirmed-pending-anchor', updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(input.confirmedAt, input.candidateId);
+    context.addRows(candidateUpdate.changes);
+    return Number(signalInsert.lastInsertRowid);
+  }).value;
+  return { status: 'ready', signalId };
+}

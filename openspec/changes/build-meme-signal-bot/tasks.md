@@ -95,7 +95,7 @@
 ## 11. 实施验收与 Shadow 就绪
 
 - [x] 11.1 建立规格到测试的验收矩阵，确保七份 capability spec 的每个 Scenario 至少对应一个自动测试或明确的真实供应商验证记录。
-- [ ] 11.2 执行全量 lint/typecheck/test/build、migration from empty、Docker smoke、重启恢复、备份恢复和 deploy dirty guard 验收。（Docker smoke 因本机 daemon 未启动保留）
+- [x] 11.2 执行全量 lint/typecheck/test/build、migration from empty、Docker smoke、重启恢复、备份恢复和 deploy dirty guard 验收。（本地全量与 Docker smoke 已通过）
 - [ ] 11.3 使用私人 GMGN Key 固化 SOL/BSC 脱敏 fixture，并验证 RPM、并发、reset、封禁、BSC ownership/open-source/tax 与比例量纲。（接口深测 52/52 已通过；主动 RPM/并发/reset 压测仍待专门负载验收）
 - [x] 11.4 实测 CoinGecko G2 quote、多 leg、重复、乱序、重连、每 socket/并发上限、rolling credits per message 和 50 池尾延迟。（当前脚本覆盖的 34 项全部通过）
 - [ ] 11.5 在服务器以 Shadow/admin anchor 部署，持续采集并验证完整率、索引延迟、可执行率、Outcome、credits、磁盘与 replay 让步。

@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Decimal } from 'decimal.js';
 import type { BotConfig } from '../config/schema.js';
 import { insertProviderEvent } from '../persistence/provider-events.js';
 import type { SqliteDatabase } from '../persistence/db.js';
@@ -12,6 +13,7 @@ import {
   coingeckoPoolBatchRawSchema,
   coingeckoTradesRawSchema,
   coingeckoG2RawSchema,
+  coingeckoOhlcv30sRawSchema,
 } from '../providers/raw-schemas.js';
 import { CandidateCycleTracker, type DiscoveryObservation } from '../pipeline/candidate.js';
 import { readDiskHealth } from '../runtime/health.js';
@@ -21,13 +23,22 @@ import { assertAnalystEndpoint } from '../providers/http.js';
 import {
   latestTradeAt,
   level1RawForPool,
+  parseCoinGeckoOhlcv30s,
   poolRawForAddress,
   poolRawsForToken,
+  toCandle,
 } from '../providers/coingecko-adapter.js';
 import { isLevel1Fresh, parseLevel1Snapshot, type Level1Snapshot } from '../market-data/level1.js';
 import { CoinGeckoG2Client } from '../providers/coingecko-g2.js';
 import { evaluateAttention, evaluateDispatchGuard, type SignalSnapshot } from '../pipeline/ace.js';
 import { createLiveSignal } from './live-signal.js';
+import {
+  evaluateExecution,
+  evaluateHorizon,
+  insertOutcome,
+  selectEntry,
+  type Candle,
+} from '../outcomes/evaluation.js';
 import {
   aggregateG2Window,
   G2IngestQueue,
@@ -89,6 +100,7 @@ export class ProviderProbe {
   private g2DrainInFlight: Promise<void> | undefined;
   private g2QueueIncomplete = false;
   private readonly signalCheckTimers = new Map<string, NodeJS.Timeout>();
+  private readonly outcomePollAt = new Map<string, number>();
   private telegram: ProbeState = 'unknown';
   private lastProbeAt: number | undefined;
   private lastError: string | undefined;
@@ -140,6 +152,7 @@ export class ProviderProbe {
     this.timer = undefined;
     for (const timer of this.signalCheckTimers.values()) clearTimeout(timer);
     this.signalCheckTimers.clear();
+    this.outcomePollAt.clear();
     await this.inFlight;
     await this.g2DrainInFlight;
     await this.g2Client?.stop();
@@ -546,6 +559,7 @@ export class ProviderProbe {
       await this.resolveCoinGeckoPools(key);
       await this.refreshLevel1(key);
       await this.armEligibleCandidates(key);
+      await this.processOutcomes(key);
       this.coingecko = 'ok';
     } catch (error) {
       this.coingecko = 'failed';
@@ -739,6 +753,299 @@ export class ProviderProbe {
         context.addRows(info.changes);
       });
     }
+  }
+
+  private async processOutcomes(key: string): Promise<void> {
+    const anchorDestination = this.options.config.delivery.outcome_anchor_destination;
+    const rows = this.options.database
+      .prepare(
+        `SELECT s.id AS signal_id, s.config_version_id, s.snapshot_json, s.pre_send_drift,
+                c.chain, c.token_address, c.pool_address, c.target_side,
+                o.status AS anchor_status, o.sent_at
+         FROM signals s
+         JOIN candidates c ON c.id = s.candidate_id
+         JOIN delivery_outbox o ON o.signal_id = s.id
+          AND o.destination = ? AND o.message_type = 'ENTRY_SIGNAL'
+         LEFT JOIN outcomes x ON x.signal_id = s.id
+         WHERE x.id IS NULL AND o.status IN ('sent', 'expired')
+         ORDER BY o.sent_at ASC, s.id ASC LIMIT 20`,
+      )
+      .all(anchorDestination) as Array<{
+      signal_id: number;
+      config_version_id: number;
+      snapshot_json: string;
+      pre_send_drift: string | null;
+      chain: 'sol' | 'bsc';
+      token_address: string;
+      pool_address: string | null;
+      target_side: 'base' | 'quote' | null;
+      anchor_status: 'sent' | 'expired';
+      sent_at: number | null;
+    }>;
+    for (const row of rows) {
+      if (row.anchor_status === 'expired' || row.sent_at === null) {
+        this.expireSignal(row.signal_id, 'anchor:expired');
+        continue;
+      }
+      const signal = parseSignalSnapshot(row.snapshot_json);
+      const pool = row.pool_address
+        ? [...this.level1Pools.values()].find(
+            (candidate) =>
+              candidate.chain === row.chain &&
+              candidate.poolAddress === row.pool_address &&
+              candidate.tokenAddress === row.token_address,
+          )
+        : undefined;
+      if (!signal || !pool || row.target_side === null) continue;
+      const now = Date.now();
+      const pollKey = pool.identityKey;
+      const lastPollAt = this.outcomePollAt.get(pollKey);
+      const ageSeconds = Math.max(0, Math.floor((now - row.sent_at) / 1000));
+      const pollMs = outcomePollIntervalMs(
+        ageSeconds,
+        this.options.config.outcomes.rest_poll_segments_seconds,
+        this.options.config.providers.coingecko.rest_requests_per_minute,
+      );
+      if (lastPollAt !== undefined && now - lastPollAt < pollMs) continue;
+      this.outcomePollAt.set(pollKey, now);
+      const maxHorizon = Math.max(...this.options.config.outcomes.horizons_seconds);
+      const finalCutoff =
+        row.sent_at +
+        (maxHorizon + this.options.config.outcomes.outcome_max_lateness_seconds) * 1000;
+      try {
+        const candles = await this.fetchOutcomeCandles(key, pool, row.sent_at, now);
+        if (now < finalCutoff) continue;
+        const trades = readNormalizedTrades(
+          this.options.database,
+          pool,
+          row.sent_at - this.options.config.outcomes.entry_max_event_delay_seconds * 1000,
+          finalCutoff,
+        );
+        const entry = selectEntry({
+          trades,
+          chain: row.chain,
+          poolAddress: pool.poolAddress,
+          tokenAddress: pool.tokenAddress,
+          anchorDeliveredAt: row.sent_at,
+          now,
+          entryTimeoutSeconds: this.options.config.outcomes.entry_timeout_seconds,
+          maxTransportDelaySeconds: this.options.config.outcomes.entry_max_event_delay_seconds,
+          maxFutureSkewSeconds: this.options.config.outcomes.max_future_event_skew_seconds,
+          anchorToleranceSeconds: this.options.config.outcomes.entry_max_event_delay_seconds,
+        });
+        const selectedEntry = entry.status === 'executable' ? entry.trade : undefined;
+        const execution = evaluateExecution({
+          entry,
+          g2CoverageComplete: !this.g2QueueIncomplete,
+          restCoverageComplete: hasCandleCoverage(
+            candles,
+            row.sent_at,
+            row.sent_at + maxHorizon * 1000,
+          ),
+          restConflict:
+            selectedEntry !== undefined &&
+            !candleContainsTrade(candles, selectedEntry, row.sent_at),
+        });
+        const entryPartial = selectedEntry ? partialFromTrades(selectedEntry, trades) : undefined;
+        const horizonResults = this.options.config.outcomes.horizons_seconds.map((horizonSeconds) =>
+          evaluateHorizon({
+            anchorDeliveredAt: row.sent_at!,
+            horizonSeconds,
+            outcomeMaxLatenessSeconds: this.options.config.outcomes.outcome_max_lateness_seconds,
+            ...(selectedEntry
+              ? {
+                  entry: { observedAt: selectedEntry.observedAt, priceUsd: selectedEntry.priceUsd },
+                }
+              : {}),
+            candles,
+            ...(entryPartial ? { entryPartial } : {}),
+          }),
+        );
+        const entryEventId = selectedEntry
+          ? findTradeId(this.options.database, selectedEntry)
+          : undefined;
+        insertOutcome(this.options.database, {
+          signalId: row.signal_id,
+          configVersionId: row.config_version_id,
+          anchorDestination,
+          anchorDeliveredAt: row.sent_at,
+          executionStatus: execution.status,
+          executionReason: execution.reason,
+          ...(entryEventId === undefined ? {} : { entryEventId }),
+          ...(selectedEntry
+            ? {
+                entryObservedAt: selectedEntry.observedAt,
+                entryPrice: selectedEntry.priceUsd,
+                deliveryDrift: drift(selectedEntry.priceUsd, signal.confirmationPriceUsd),
+              }
+            : {}),
+          ...(row.pre_send_drift === null ? {} : { preSendDrift: row.pre_send_drift }),
+          horizonResults,
+          createdAt: now,
+          budget: this.options.writeBudget,
+        });
+        this.completeSignal(row.signal_id);
+      } catch (error) {
+        this.options.logger('warn', 'outcome_runtime_incomplete', {
+          signal_id: row.signal_id,
+          error: this.safeError(error),
+        });
+      }
+    }
+  }
+
+  private async fetchOutcomeCandles(
+    key: string,
+    pool: CanonicalPool,
+    anchorDeliveredAt: number,
+    now: number,
+  ): Promise<Candle[]> {
+    const network = pool.chain === 'sol' ? 'solana' : 'bsc';
+    const limit = Math.min(
+      500,
+      Math.ceil(
+        (Math.max(...this.options.config.outcomes.horizons_seconds) +
+          this.options.config.outcomes.outcome_max_lateness_seconds +
+          this.options.config.outcomes.entry_timeout_seconds) /
+          30,
+      ) + 4,
+    );
+    const url = `${this.options.config.providers.coingecko.rest_base_url}/onchain/networks/${network}/pools/${encodeURIComponent(pool.poolAddress)}/ohlcv/second?aggregate=30&limit=${limit}&currency=usd&token=${pool.targetSide}&include_empty_intervals=true`;
+    assertAnalystEndpoint(url, this.options.config.providers.coingecko.rest_base_url);
+    const result = await requestJson<Record<string, unknown>>(
+      url,
+      { headers: { 'x-cg-pro-api-key': key } },
+      httpOptions(this.options.config, 'coingecko', 'ohlcv.30s'),
+    );
+    const observedAt = Date.now();
+    const parsed = coingeckoOhlcv30sRawSchema.parse(result.data);
+    const payload = JSON.stringify(parsed);
+    const providerEvent = insertProviderEvent(
+      this.options.database,
+      {
+        provider: 'coingecko',
+        capability: 'ohlcv.30s',
+        chain: pool.chain,
+        tokenAddress: pool.tokenAddress,
+        poolAddress: pool.poolAddress,
+        observedAt,
+        schemaVersion: 'coingecko.ohlcv.30s.v1',
+        payload,
+        billingBucket: 'outcome',
+        requestMeta: {
+          endpoint_name: 'onchain.pools.ohlcv.second',
+          method: 'GET',
+          status: result.diagnostic.status,
+          response_bytes: Buffer.byteLength(payload),
+        },
+      },
+      this.options.writeBudget,
+    );
+    const rows = parseCoinGeckoOhlcv30s(parsed, pool, observedAt).filter(
+      (row) =>
+        row.timestampMs < now + 30_000 && row.timestampMs + 30_000 > anchorDeliveredAt - 30_000,
+    );
+    for (const row of rows) {
+      const latest = this.options.database
+        .prepare(
+          `SELECT revision, open_price, high_price, low_price, close_price, volume, is_closed
+           FROM candles_30s WHERE chain = ? AND pool_address = ? AND token_address = ?
+             AND target_side = ? AND open_time = ? ORDER BY revision DESC LIMIT 1`,
+        )
+        .get(pool.chain, pool.poolAddress, pool.tokenAddress, pool.targetSide, row.timestampMs) as
+        | {
+            revision: number;
+            open_price: string;
+            high_price: string;
+            low_price: string;
+            close_price: string;
+            volume: string;
+            is_closed: number;
+          }
+        | undefined;
+      const revision =
+        latest && sameCandleDbValues(latest, row) ? latest.revision : (latest?.revision ?? -1) + 1;
+      const candle = toCandle(pool, row, observedAt, revision);
+      if (
+        latest &&
+        sameCandleDbValues(latest, row) &&
+        latest.is_closed === (candle.isClosed ? 1 : 0)
+      )
+        continue;
+      boundedWrite(this.options.database, this.options.writeBudget, (context) => {
+        this.options.database
+          .prepare(
+            `INSERT INTO candles_30s
+             (provider_event_id, chain, pool_address, token_address, target_side, interval_seconds,
+              open_time, revision, observed_at, is_closed, open_price, high_price, low_price, close_price, volume, parser_version)
+             VALUES (?, ?, ?, ?, ?, 30, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'coingecko.ohlcv.30s.v1')`,
+          )
+          .run(
+            providerEvent.id,
+            candle.chain,
+            candle.poolAddress,
+            candle.tokenAddress,
+            candle.targetSide,
+            candle.openTime,
+            candle.revision,
+            candle.observedAt,
+            candle.isClosed ? 1 : 0,
+            candle.openPrice,
+            candle.highPrice,
+            candle.lowPrice,
+            candle.closePrice,
+            candle.volume,
+          );
+        context.addRows(1);
+      });
+    }
+    return readCandles(this.options.database, pool, anchorDeliveredAt - 30_000, now + 30_000);
+  }
+
+  private expireSignal(signalId: number, reason: string): void {
+    boundedWrite(this.options.database, this.options.writeBudget, (context) => {
+      const signal = this.options.database
+        .prepare(
+          `UPDATE signals SET status = 'expired', cancel_reason = ? WHERE id = ? AND status != 'completed'`,
+        )
+        .run(reason, signalId);
+      const candidate = this.options.database
+        .prepare(
+          `UPDATE candidates SET status = 'expired', funnel_status = 'expired', close_reason = ?, updated_at = ?
+           WHERE id = (SELECT candidate_id FROM signals WHERE id = ?) AND status != 'completed'`,
+        )
+        .run(reason, Date.now(), signalId);
+      context.addRows(signal.changes + candidate.changes);
+    });
+    this.unsetSignalG2(signalId);
+  }
+
+  private completeSignal(signalId: number): void {
+    boundedWrite(this.options.database, this.options.writeBudget, (context) => {
+      const signal = this.options.database
+        .prepare(`UPDATE signals SET status = 'completed' WHERE id = ? AND status != 'completed'`)
+        .run(signalId);
+      const candidate = this.options.database
+        .prepare(
+          `UPDATE candidates SET status = 'completed', funnel_status = 'completed', updated_at = ?
+           WHERE id = (SELECT candidate_id FROM signals WHERE id = ?) AND status != 'completed'`,
+        )
+        .run(Date.now(), signalId);
+      context.addRows(signal.changes + candidate.changes);
+    });
+    this.unsetSignalG2(signalId);
+  }
+
+  private unsetSignalG2(signalId: number): void {
+    const signal = this.options.database
+      .prepare(
+        `SELECT c.chain, c.pool_address, c.token_address
+         FROM signals s JOIN candidates c ON c.id = s.candidate_id WHERE s.id = ?`,
+      )
+      .get(signalId) as
+      { chain: 'sol' | 'bsc'; pool_address: string | null; token_address: string } | undefined;
+    if (signal?.pool_address)
+      this.g2Client?.unset(`${signal.chain}:${signal.pool_address}:${signal.token_address}`);
   }
 
   private recordG2Message(message: Record<string, unknown>, observedAt: number): void {
@@ -1242,6 +1549,178 @@ function parseSignalSnapshot(value: string): SignalSnapshot | undefined {
   } catch {
     return undefined;
   }
+}
+
+function sameCandleDbValues(
+  latest: {
+    open_price: string;
+    high_price: string;
+    low_price: string;
+    close_price: string;
+    volume: string;
+  },
+  row: {
+    openPrice: string;
+    highPrice: string;
+    lowPrice: string;
+    closePrice: string;
+    volume: string;
+  },
+): boolean {
+  return (
+    latest.open_price === row.openPrice &&
+    latest.high_price === row.highPrice &&
+    latest.low_price === row.lowPrice &&
+    latest.close_price === row.closePrice &&
+    latest.volume === row.volume
+  );
+}
+
+function readCandles(
+  database: SqliteDatabase,
+  pool: CanonicalPool,
+  start: number,
+  end: number,
+): Candle[] {
+  const rows = database
+    .prepare(
+      `SELECT chain, pool_address, token_address, target_side, interval_seconds, open_time,
+              revision, observed_at, is_closed, open_price, high_price, low_price, close_price, volume
+       FROM candles_30s
+       WHERE chain = ? AND pool_address = ? AND token_address = ? AND target_side = ?
+         AND open_time >= ? AND open_time < ?
+       ORDER BY open_time ASC, revision ASC`,
+    )
+    .all(pool.chain, pool.poolAddress, pool.tokenAddress, pool.targetSide, start, end) as Array<
+    Record<string, unknown>
+  >;
+  return rows.flatMap((row) => {
+    if (
+      (row.chain !== 'sol' && row.chain !== 'bsc') ||
+      typeof row.pool_address !== 'string' ||
+      typeof row.token_address !== 'string' ||
+      (row.target_side !== 'base' && row.target_side !== 'quote') ||
+      row.interval_seconds !== 30 ||
+      !Number.isSafeInteger(row.open_time) ||
+      !Number.isSafeInteger(row.revision) ||
+      !Number.isSafeInteger(row.observed_at) ||
+      (row.is_closed !== 0 && row.is_closed !== 1) ||
+      typeof row.open_price !== 'string' ||
+      typeof row.high_price !== 'string' ||
+      typeof row.low_price !== 'string' ||
+      typeof row.close_price !== 'string' ||
+      typeof row.volume !== 'string'
+    )
+      return [];
+    return [
+      {
+        chain: row.chain,
+        poolAddress: row.pool_address,
+        tokenAddress: row.token_address,
+        targetSide: row.target_side,
+        intervalSeconds: 30,
+        openTime: row.open_time,
+        revision: row.revision,
+        observedAt: row.observed_at,
+        isClosed: row.is_closed === 1,
+        openPrice: row.open_price,
+        highPrice: row.high_price,
+        lowPrice: row.low_price,
+        closePrice: row.close_price,
+        volume: row.volume,
+      } as Candle,
+    ];
+  });
+}
+
+function hasCandleCoverage(candles: readonly Candle[], start: number, end: number): boolean {
+  const first = Math.ceil(start / 30_000) * 30_000;
+  const latest = new Set(
+    candles.filter((candle) => candle.isClosed).map((candle) => candle.openTime),
+  );
+  for (let openTime = first; openTime < end; openTime += 30_000)
+    if (!latest.has(openTime)) return false;
+  return true;
+}
+
+function candleContainsTrade(
+  candles: readonly Candle[],
+  trade: NormalizedTrade,
+  anchorDeliveredAt: number,
+): boolean {
+  const openTime = Math.floor(trade.eventAt / 30_000) * 30_000;
+  if (openTime < Math.ceil(anchorDeliveredAt / 30_000) * 30_000) return true;
+  const candle = candles
+    .filter((item) => item.isClosed && item.openTime === openTime)
+    .sort((left, right) => right.revision - left.revision)
+    .at(0);
+  if (!candle) return false;
+  try {
+    const price = new Decimal(trade.priceUsd);
+    return (
+      price.greaterThanOrEqualTo(new Decimal(candle.lowPrice)) &&
+      price.lessThanOrEqualTo(new Decimal(candle.highPrice))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function outcomePollIntervalMs(
+  ageSeconds: number,
+  segments: readonly number[],
+  requestsPerMinute: number,
+): number {
+  const [first = 600, second = 1_800] = segments;
+  const base = Math.max(60_000 / requestsPerMinute, 30_000);
+  if (ageSeconds < first) return base;
+  if (ageSeconds < second) return Math.max(base, 60_000);
+  return Math.max(base, 120_000);
+}
+
+function partialFromTrades(
+  entry: NormalizedTrade,
+  trades: readonly NormalizedTrade[],
+): { highPrice: string; lowPrice: string; complete: boolean } | undefined {
+  if (entry.observedAt % 30_000 === 0) return undefined;
+  const nextBoundary = Math.ceil(entry.observedAt / 30_000) * 30_000;
+  const partial = trades.filter(
+    (trade) =>
+      trade.observedAt >= entry.observedAt &&
+      trade.observedAt < nextBoundary &&
+      trade.dedupStatus === 'unique' &&
+      trade.ambiguityStatus === 'none',
+  );
+  if (partial.length === 0)
+    return { highPrice: entry.priceUsd, lowPrice: entry.priceUsd, complete: false };
+  const prices = partial.map((trade) => new Decimal(trade.priceUsd));
+  return {
+    highPrice: prices.reduce((max, value) => (value.greaterThan(max) ? value : max)).toString(),
+    lowPrice: prices.reduce((min, value) => (value.lessThan(min) ? value : min)).toString(),
+    complete: true,
+  };
+}
+
+function findTradeId(database: SqliteDatabase, trade: NormalizedTrade): number | undefined {
+  const row = database
+    .prepare(
+      `SELECT id FROM trades
+       WHERE chain = ? AND pool_address = ? AND token_address = ? AND event_at = ?
+         AND observed_at = ? AND item_index = ? ORDER BY id ASC LIMIT 1`,
+    )
+    .get(
+      trade.chain,
+      trade.poolAddress,
+      trade.tokenAddress,
+      trade.eventAt,
+      trade.observedAt,
+      trade.itemIndex,
+    ) as { id: number } | undefined;
+  return row?.id;
+}
+
+function drift(price: string, confirmation: string): string {
+  return new Decimal(price).div(new Decimal(confirmation)).minus(1).toString();
 }
 
 function readNormalizedTrades(

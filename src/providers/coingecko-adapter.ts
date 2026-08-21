@@ -1,8 +1,84 @@
 import type { RawPool } from '../market-data/pools.js';
 import type { CanonicalPool } from '../market-data/pools.js';
 import type { RawLevel1 } from '../market-data/level1.js';
+import type { Candle } from '../outcomes/evaluation.js';
+import { Decimal } from 'decimal.js';
+import { parseDecimalString, parseInteger } from './parsing.js';
 
 type JsonRecord = Record<string, unknown>;
+
+export type CoinGeckoOhlcvRow = {
+  timestampMs: number;
+  openPrice: string;
+  highPrice: string;
+  lowPrice: string;
+  closePrice: string;
+  volume: string;
+};
+
+export function parseCoinGeckoOhlcv30s(
+  response: JsonRecord,
+  pool: CanonicalPool,
+  observedAt: number,
+): CoinGeckoOhlcvRow[] {
+  const rows = Array.isArray(response.data) ? response.data : [];
+  return rows
+    .flatMap((row) => {
+      if (!Array.isArray(row) || row.length !== 6 || typeof row[0] !== 'number') return [];
+      try {
+        const rawTimestamp = parseInteger(row[0], { min: 0 });
+        const timestampMs = rawTimestamp < 1_000_000_000_000 ? rawTimestamp * 1000 : rawTimestamp;
+        parseInteger(timestampMs, { min: 0 });
+        const values = row.slice(1).map((value) => {
+          if (typeof value !== 'string') throw new Error('Invalid OHLCV value');
+          parseDecimalString(value, { nonNegative: true });
+          return value;
+        });
+        if (values.some((value) => value === '')) throw new Error('Invalid OHLCV value');
+        const [openPrice, highPrice, lowPrice, closePrice, volume] = values;
+        if (!openPrice || !highPrice || !lowPrice || !closePrice || !volume) return [];
+        const open = new Decimal(openPrice);
+        const high = new Decimal(highPrice);
+        const low = new Decimal(lowPrice);
+        const close = new Decimal(closePrice);
+        if (
+          high.lessThan(open) ||
+          high.lessThan(close) ||
+          low.greaterThan(open) ||
+          low.greaterThan(close)
+        )
+          return [];
+        return [{ timestampMs, openPrice, highPrice, lowPrice, closePrice, volume }];
+      } catch {
+        return [];
+      }
+    })
+    .filter((row) => row.timestampMs + 30_000 <= observedAt);
+}
+
+export function toCandle(
+  pool: CanonicalPool,
+  row: CoinGeckoOhlcvRow,
+  observedAt: number,
+  revision: number,
+): Candle {
+  return {
+    chain: pool.chain,
+    poolAddress: pool.poolAddress,
+    tokenAddress: pool.tokenAddress,
+    targetSide: pool.targetSide,
+    intervalSeconds: 30,
+    openTime: row.timestampMs,
+    revision,
+    observedAt,
+    isClosed: row.timestampMs + 30_000 <= observedAt,
+    openPrice: row.openPrice,
+    highPrice: row.highPrice,
+    lowPrice: row.lowPrice,
+    closePrice: row.closePrice,
+    volume: row.volume,
+  };
+}
 
 export function tokenAddressFromCoinGeckoItem(item: JsonRecord): string | undefined {
   const attributes = asRecord(item.attributes);

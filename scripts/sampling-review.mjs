@@ -105,6 +105,30 @@ const productionDiscoveryCoverage = all(
 `,
   ...productionDiscoverySources,
 );
+const productionUnresolvedAge = all(
+  `
+  WITH first_seen AS (
+    SELECT c.chain, c.token_address, MIN(c.observed_at) AS first_seen_at
+    FROM candidate_observations c
+    WHERE c.source IN (?, ?)
+    GROUP BY c.chain, c.token_address
+  )
+  SELECT f.chain,
+         COUNT(*) AS unresolved_tokens,
+         SUM(CASE WHEN f.first_seen_at >= ? - 30 * 60 * 1000 THEN 1 ELSE 0 END) AS under_30m,
+         SUM(CASE WHEN f.first_seen_at < ? - 30 * 60 * 1000 THEN 1 ELSE 0 END) AS over_30m,
+         SUM(CASE WHEN f.first_seen_at < ? - 2 * 60 * 60 * 1000 THEN 1 ELSE 0 END) AS over_2h
+  FROM first_seen f
+  LEFT JOIN token_pools p ON p.chain = f.chain AND p.token_address = f.token_address
+  WHERE p.token_address IS NULL
+  GROUP BY f.chain
+  ORDER BY f.chain
+`,
+  ...productionDiscoverySources,
+  lastObservedAt,
+  lastObservedAt,
+  lastObservedAt,
+);
 const credits = all(`
   SELECT observed_at, plan, rpm, monthly_credit, used_credit, remaining_credit
   FROM credit_samples
@@ -192,6 +216,7 @@ const result = {
     sources: productionDiscoverySources,
     chains: productionDiscoveryCoverage,
   },
+  productionUnresolvedAge,
   websocket_events: Number(websocketEvents?.events ?? 0),
   credits: {
     samples: credits.length,

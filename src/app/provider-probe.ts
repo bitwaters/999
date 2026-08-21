@@ -196,6 +196,7 @@ export class ProviderProbe {
   private g2DrainInFlight: Promise<void> | undefined;
   private g2QueueIncomplete = false;
   private readonly signalCheckTimers = new Map<string, NodeJS.Timeout>();
+  private readonly signalBlockLogKeys = new Set<string>();
   private readonly outcomePollAt = new Map<string, number>();
   private telegram: ProbeState = 'unknown';
   private lastProbeAt: number | undefined;
@@ -1330,7 +1331,10 @@ export class ProviderProbe {
       });
       return;
     }
-    if (result.status !== 'created') return;
+    if (result.status !== 'created') {
+      this.logSignalBlocked(trade, result.reasons);
+      return;
+    }
     this.g2Client?.request(pool, 'confirmed-pending-anchor');
     this.options.logger('info', 'signal_created', {
       signal_id: result.signalId,
@@ -1351,6 +1355,21 @@ export class ProviderProbe {
       Math.max(1, at - Date.now()),
     );
     this.signalCheckTimers.set(key, timer);
+  }
+
+  private logSignalBlocked(trade: NormalizedTrade, reasons: readonly string[]): void {
+    const windowEnd = Math.floor(Date.now() / 30_000) * 30_000;
+    const normalizedReasons = [...new Set(reasons)].sort();
+    const key = `${trade.chain}:${trade.poolAddress}:${trade.tokenAddress}:${windowEnd}:${normalizedReasons.join('|')}`;
+    if (this.signalBlockLogKeys.has(key)) return;
+    if (this.signalBlockLogKeys.size >= 10_000) this.signalBlockLogKeys.clear();
+    this.signalBlockLogKeys.add(key);
+    this.options.logger('info', 'signal_blocked', {
+      chain: trade.chain,
+      pool_address: trade.poolAddress,
+      window_end: windowEnd,
+      reasons: normalizedReasons,
+    });
   }
 
   private findAnchorCooldown(

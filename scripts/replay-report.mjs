@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { gunzipSync } from 'node:zlib';
 
+const DEFAULT_REPLAY_WINDOW_MS = 15 * 60 * 1000;
+
 function requireCleanMain() {
   if (process.env.CONTAINERIZED_RUN !== '1')
     throw new Error('replay/report wrapper must run inside the versioned container');
@@ -124,6 +126,11 @@ async function loadRuntime() {
 async function runReplayCommand(values) {
   const { loaded, database, runReplay } = await loadRuntime();
   try {
+    database
+      .prepare(
+        "UPDATE replay_runs SET status = 'failed', error_message = ?, completed_at = ? WHERE status = 'running'",
+      )
+      .run('recovered stale replay process before new run', Date.now());
     const configuredVersion = database.prepare(
       'SELECT id FROM rule_config_versions WHERE config_hash = ? AND git_commit = ? AND run_mode = ?',
     ).pluck().get(loaded.configHash, loaded.gitCommit, loaded.runMode);
@@ -135,7 +142,11 @@ async function runReplayCommand(values) {
       'cutoff',
       Number(database.prepare('SELECT MAX(observed_at) FROM provider_events').pluck().get() ?? 0),
     );
-    const start = integerOption(values, 'start', 0);
+    const start = integerOption(
+      values,
+      'start',
+      Math.max(0, cutoff - DEFAULT_REPLAY_WINDOW_MS),
+    );
     const end = integerOption(values, 'end', cutoff);
     if (end > cutoff) throw new Error('--end cannot exceed --cutoff');
     const rows = database

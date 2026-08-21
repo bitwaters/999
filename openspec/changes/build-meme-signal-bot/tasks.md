@@ -64,13 +64,13 @@
 
 ## 8. Outcome 与报告
 
-- [ ] 8.1 实现锚点后 G2 保留、entry 时间/identity 校验、最早 observed_at 选择、delivery-to-entry latency 和 entry timeout。
-- [ ] 8.2 实现 `execution_status=executable|not_executable|incomplete`，并只用锚点后 REST Trades 或首个对齐边界后的完整 OHLCV 检查“G2 零成交”冲突。
-- [ ] 8.3 实现从 anchor_delivered_at 开始的 30 秒 OHLCV 分段轮询、target-token candle identity、闭合判断、完全重复去重和不可变 revision。
-- [ ] 8.4 实现 entry-partial、每 horizon evaluation cutoff、latest-observed revision 选择和固化后不改写。
-- [ ] 8.5 实现逐 horizon `complete|late_entry|incomplete`、目标时点后最早合格 close、pre-send/delivery drift、forward return、MFE、MAE 和覆盖缺口原因，并验证全部价格同池同方向同单位。
-- [ ] 8.6 实现按 config version/run mode/time range 的有界 REPORT，明确展示全部分母、可执行率、完整率、收益、漂移、credits 与延迟。
-- [ ] 8.7 测试 entry 前 high/low 不泄漏、late revision 不改结果、entry 晚于 horizon、无成交、REST/G2 冲突和固定时点缺口。
+- [x] 8.1 实现锚点后 G2 保留、entry 时间/identity 校验、最早 observed_at 选择、delivery-to-entry latency 和 entry timeout。
+- [x] 8.2 实现 `execution_status=executable|not_executable|incomplete`，并只用锚点后 REST Trades 或首个对齐边界后的完整 OHLCV 检查“G2 零成交”冲突。
+- [x] 8.3 实现从 anchor_delivered_at 开始的 30 秒 OHLCV 分段轮询、target-token candle identity、闭合判断、完全重复去重和不可变 revision。
+- [x] 8.4 实现 entry-partial、每 horizon evaluation cutoff、latest-observed revision 选择和固化后不改写。
+- [x] 8.5 实现逐 horizon `complete|late_entry|incomplete`、目标时点后最早合格 close、pre-send/delivery drift、forward return、MFE、MAE 和覆盖缺口原因，并验证全部价格同池同方向同单位。
+- [x] 8.6 实现按 config version/run mode/time range 的有界 REPORT，明确展示全部分母、可执行率、完整率、收益、漂移、credits 与延迟。
+- [x] 8.7 测试 entry 前 high/low 不泄漏、late revision 不改结果、entry 晚于 horizon、无成交、REST/G2 冲突和固定时点缺口。
 
 ## 9. 确定性 Replay
 

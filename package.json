@@ -11,6 +11,7 @@
     "build": "tsc -p tsconfig.build.json && node scripts/copy-migrations.mjs",
     "config:validate": "node --import tsx src/app/validate-config.ts",
     "health:check": "node --import tsx src/app/healthcheck.ts",
+    "bot:run": "node --import tsx src/app/main.ts",
     "replay:report": "node scripts/replay-report.mjs",
     "sampling:run": "node scripts/continuous-sampler.mjs",
     "provider:contract": "node --import tsx src/providers/contract-check.ts",

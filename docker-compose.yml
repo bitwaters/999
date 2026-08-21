@@ -10,9 +10,17 @@ services:
       CONTAINERIZED_RUN: ${CONTAINERIZED_RUN:-0}
       BUILD_GIT_COMMIT: ${BUILD_GIT_COMMIT:-unknown}
       BUILD_WORKTREE_STATUS: ${BUILD_WORKTREE_STATUS:-unknown}
+      RUNTIME_HEALTH_REQUIRED: '1'
+    command: ['node', 'dist/app/main.js']
     volumes:
       - bot-data:/app/data
-    restart: "no"
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'node', 'dist/app/healthcheck.js']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
     read_only: true
     tmpfs:
       - /tmp
@@ -21,7 +29,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["node", "scripts/continuous-sampler.mjs"]
+    command: ['node', 'scripts/continuous-sampler.mjs']
     env_file:
       - path: .env
         required: false

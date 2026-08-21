@@ -89,7 +89,7 @@
 - [x] 10.3 实现 SQLite 定时备份、恢复校验、配置化保留和磁盘水位；完全不可写时健康失败并输出 stderr，而不依赖 Outbox。
 - [x] 10.4 创建最小 Dockerfile、Docker Compose、持久化卷、`.env.example` 和 secrets/DB/WAL/log/backup gitignore。
 - [x] 10.5 创建 GitHub Actions，执行 npm ci、lint、typecheck、test、build 和 Docker smoke。
-- [ ] 10.6 创建简短 deploy.sh：dirty 检查、ff-only pull、Compose rebuild/start、健康检查；不得包含服务器代码/配置修改逻辑。（现已启动并等待独立的原始 Shadow sampler 服务；应用容器仍只有一次性 healthcheck，仓库没有正式长期运行的 Signal/Outcome Bot runtime，尚未满足完整 start 语义）
+- [ ] 10.6 创建简短 deploy.sh：dirty 检查、ff-only pull、Compose rebuild/start、健康检查；不得包含服务器代码/配置修改逻辑。（应用容器现已具备长期 runtime foundation：配置版本、SQLite、备份、事件循环监测、心跳和 SIGTERM 停机；独立原始 Shadow sampler 也可等待启动。但 provider/pipeline/delivery/Outcome 尚未接入，完整 Signal/Outcome Bot start 语义仍未满足）
 - [x] 10.7 创建版本化 replay/report wrapper，限定 clean main 容器运行并只通过 repository 写允许的表。
 
 ## 11. 实施验收与 Shadow 就绪

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
@@ -12,9 +12,11 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const config = JSON.parse(
   await readFile(path.join(root, 'config/preflight-sampling.json'), 'utf8'),
 );
-const envText = await readFile(path.join(root, '.env.preflight'), 'utf8');
+const envText = await readFile(path.join(root, '.env.preflight'), 'utf8').catch(() => '');
 
 function envValue(key) {
+  const processValue = process.env[key]?.trim();
+  if (processValue) return processValue;
   const line = envText.split(/\r?\n/u).find((item) => item.startsWith(`${key}=`));
   return line
     ? line
@@ -27,6 +29,8 @@ function envValue(key) {
 const gmgnKey = envValue('GMGN_API_KEY');
 const cgKey = envValue('COINGECKO_PRO_API_KEY');
 if (!gmgnKey || !cgKey) throw new Error('持续采样需要 GMGN_API_KEY 和 COINGECKO_PRO_API_KEY');
+const gmgnCli = path.join(root, 'node_modules/gmgn-cli/dist/index.js');
+await access(gmgnCli);
 
 const storageDir = path.join(root, config.storage.directory);
 await mkdir(storageDir, { recursive: true });
@@ -191,7 +195,7 @@ function countRows(json) {
 
 function gmgn(args) {
   return new Promise((resolve, reject) => {
-    const child = spawn('npx', ['--yes', 'gmgn-cli', ...args, '--raw'], {
+    const child = spawn(process.execPath, [gmgnCli, ...args, '--raw'], {
       cwd: root,
       env: { ...process.env, GMGN_API_KEY: gmgnKey },
       stdio: ['ignore', 'pipe', 'pipe'],

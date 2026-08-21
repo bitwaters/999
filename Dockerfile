@@ -19,5 +19,7 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/config ./config
 COPY --from=build /app/scripts/replay-report.mjs ./scripts/replay-report.mjs
+COPY --from=build /app/scripts/continuous-sampler.mjs ./scripts/continuous-sampler.mjs
+COPY --from=build /app/scripts/redact.mjs ./scripts/redact.mjs
 VOLUME ["/app/data"]
 CMD ["node", "dist/app/healthcheck.js"]

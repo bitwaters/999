@@ -12,6 +12,7 @@
     "config:validate": "node --import tsx src/app/validate-config.ts",
     "health:check": "node --import tsx src/app/healthcheck.ts",
     "replay:report": "node scripts/replay-report.mjs",
+    "sampling:run": "node scripts/continuous-sampler.mjs",
     "provider:contract": "node --import tsx src/providers/contract-check.ts",
     "sampling:audit": "node scripts/sampling-audit.mjs",
     "sampling:review": "node scripts/sampling-review.mjs",
@@ -25,6 +26,7 @@
   "dependencies": {
     "better-sqlite3": "^13.0.3",
     "decimal.js": "^10.6.0",
+    "gmgn-cli": "^1.5.6",
     "yaml": "^2.8.1",
     "zod": "^4.4.3"
   },

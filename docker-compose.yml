@@ -4,7 +4,8 @@ services:
       context: .
       dockerfile: Dockerfile
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       CONTAINERIZED_RUN: ${CONTAINERIZED_RUN:-0}
       BUILD_GIT_COMMIT: ${BUILD_GIT_COMMIT:-unknown}
@@ -16,5 +17,34 @@ services:
     tmpfs:
       - /tmp
 
+  sampler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["node", "scripts/continuous-sampler.mjs"]
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - sampling-data:/app/sampling-data
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          const fs = require('node:fs'); const p = '/app/sampling-data/status.json';
+          const s = JSON.parse(fs.readFileSync(p, 'utf8')); if (s.state !== 'running'
+          || Date.now() - Date.parse(s.updated_at) > 180000) process.exit(1);
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
 volumes:
   bot-data:
+  sampling-data:

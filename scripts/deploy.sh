@@ -9,6 +9,14 @@ if [[ -n "$(git status --porcelain)" ]]; then
   echo 'deploy requires a clean worktree' >&2
   exit 1
 fi
+if ! git remote get-url origin >/dev/null 2>&1; then
+  echo 'deploy requires a configured origin remote' >&2
+  exit 1
+fi
+if [[ ! -f .env ]]; then
+  echo 'deploy requires a server-side .env file' >&2
+  exit 1
+fi
 
 git pull --ff-only origin main
 export CONTAINERIZED_RUN=1

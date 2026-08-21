@@ -76,7 +76,7 @@ async function test(name, args, apiKey) {
       };
       results.push(result);
       console.log(`PASS ${name} (${result.latency_ms}ms, attempts=${attempt})`);
-      await delay(250);
+      await delay(1000);
       return json;
     } catch (error) {
       lastError = error;

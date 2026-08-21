@@ -44,8 +44,8 @@ export function normalizeG2Item(
       throw new Error('identity:pool_address');
     const rawSide = parseSide(raw.ty);
     const eventAt = parseTimestampMs(raw.t);
-    const tokenAmount = parseDecimalString(raw.to, { nonNegative: true });
-    const quoteAmount = parseDecimalString(raw.toq, { nonNegative: true });
+    const tokenAmount = parseG2Decimal(raw.to);
+    const quoteAmount = parseG2Decimal(raw.toq);
     if (tokenAmount.isZero()) throw new Error('invalid:zero_token_amount');
     const identity = optionalIdentity(raw);
     const item = parseInteger(raw.item_index ?? itemIndex, { min: 0 });
@@ -340,8 +340,17 @@ function networkForChain(chain: CanonicalPool['chain']): string {
 }
 
 function parseSide(value: unknown): 'buy' | 'sell' {
-  if (value === 'buy' || value === 'sell') return value;
+  if (value === 'buy' || value === 'b') return 'buy';
+  if (value === 'sell' || value === 's') return 'sell';
   throw new Error('invalid:side');
+}
+
+function parseG2Decimal(value: unknown): Decimal {
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new Error('Invalid G2 numeric value');
+    return parseDecimalString(new Decimal(value).toFixed(), { nonNegative: true });
+  }
+  return parseDecimalString(value, { nonNegative: true });
 }
 
 function invertSide(side: 'buy' | 'sell'): 'buy' | 'sell' {

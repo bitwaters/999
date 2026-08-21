@@ -47,7 +47,28 @@ test('G2 normalizer converts quote-side direction and preserves item legs', () =
     assert.equal(parsed.trade.observedAt, 1_100);
     assert.equal(parsed.trade.itemIndex, 0);
   }
-  assert.equal(normalizeG2Item({ ...raw('buy'), to: 10 }, pool, 1_100).status, 'invalid');
+  assert.equal(normalizeG2Item({ ...raw('buy'), to: 'not-a-number' }, pool, 1_100).status, 'invalid');
+});
+
+test('G2 normalizer accepts the live compact side and numeric amount encoding', () => {
+  const buy = normalizeG2Item(
+    { ...raw('buy'), ty: 'b', t: 1_000, to: 1.25, toq: 100 },
+    pool,
+    1_100,
+  );
+  const sell = normalizeG2Item(
+    { ...raw('sell'), ty: 's', t: 1_000, to: 1.25, toq: 100 },
+    pool,
+    1_100,
+  );
+  assert.equal(buy.status, 'complete');
+  assert.equal(sell.status, 'complete');
+  if (buy.status === 'complete' && sell.status === 'complete') {
+    assert.equal(buy.trade.rawSide, 'buy');
+    assert.equal(sell.trade.rawSide, 'sell');
+    assert.equal(buy.trade.tokenAmount, '1.25');
+    assert.equal(buy.trade.quoteAmount, '100');
+  }
 });
 
 test('trade deduplication distinguishes exact replay from ambiguous collision', () => {

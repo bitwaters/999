@@ -164,6 +164,7 @@ test('replay data end blocks later confirmations while cutoff still supplies out
     evidence: evidence(),
   });
   assert.equal(results[0]!.simulatedSignal.status, 'blocked');
+  assert.equal(results[0]!.completenessStatus, 'partial');
 });
 
 test('replay warmup seeds cooldown without emitting a pre-window signal', () => {

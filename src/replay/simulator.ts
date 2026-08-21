@@ -114,12 +114,14 @@ function simulateCycle(input: {
 
   let lastBlocked: Record<string, unknown> = { reasons: ['signal:not_evaluated'] };
   let evidenceIncomplete = false;
+  let evaluatedInResultWindow = false;
   for (const confirmationAt of [...new Set(normalizedTrades.map((trade) => trade.observedAt))].sort(
     (left, right) => left - right,
   )) {
     if (confirmationAt > input.dataEndAt) break;
     if (confirmationAt < resolvedPool.observedAt) continue;
     const inResultWindow = confirmationAt >= input.dataStartAt;
+    if (inResultWindow) evaluatedInResultWindow = true;
     if (confirmationAt > input.cycle.lastSeenAt + chainConfig(input).discovery.candidate_ttl_seconds * 1000)
       break;
     const safety = safetyAt(input, relevant, confirmationAt);
@@ -222,7 +224,11 @@ function simulateCycle(input: {
     simulatedSignal: { status: 'blocked', ...lastBlocked },
     outcome: { status: 'unavailable', reason: 'signal:not_confirmed' },
     completenessStatus:
-      !evidenceIncomplete && hasCoreEvidence(input, relevant, pool) ? 'full' : 'partial',
+      evaluatedInResultWindow &&
+      !evidenceIncomplete &&
+      hasCoreEvidence(input, relevant, pool)
+        ? 'full'
+        : 'partial',
   };
 }
 

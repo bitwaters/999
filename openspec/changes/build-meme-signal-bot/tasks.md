@@ -96,8 +96,8 @@
 
 - [x] 11.1 建立规格到测试的验收矩阵，确保七份 capability spec 的每个 Scenario 至少对应一个自动测试或明确的真实供应商验证记录。
 - [x] 11.2 执行全量 lint/typecheck/test/build、migration from empty、Docker smoke、重启恢复、备份恢复和 deploy dirty guard 验收。（本地全量与 Docker smoke 已通过）
-- [ ] 11.3 使用私人 GMGN Key 固化 SOL/BSC 脱敏 fixture，并验证 RPM、并发、reset、封禁、BSC ownership/open-source/tax 与比例量纲。（接口深测 52/52 已通过；主动 RPM/并发/reset 压测仍待专门负载验收）
+- [ ] 11.3 使用私人 GMGN Key 固化 SOL/BSC 脱敏 fixture，并验证 RPM、并发、reset、封禁、BSC ownership/open-source/tax 与比例量纲。（接口深测 52/52、受控 2 路并发及 5.2 秒 pacing 4 次均通过；未主动触发压力封禁，RPM 上限与 reset 边界仍待专门验收）
 - [x] 11.4 实测 CoinGecko G2 quote、多 leg、重复、乱序、重连、每 socket/并发上限、rolling credits per message 和 50 池尾延迟。（当前脚本覆盖的 34 项全部通过）
 - [ ] 11.5 在服务器以 Shadow/admin anchor 部署，持续采集并验证完整率、索引延迟、可执行率、Outcome、credits、磁盘与 replay 让步。（SSH 可达，但服务器未提供本项目仓库/Compose/部署路径，未擅自写入其他项目）
-- [ ] 11.6 基于累计样本完成训练/最近验证切片、参数敏感性、预算模拟和 S1 风险政策人工评审；未通过前保持 Shadow。（只读审计已固化：145 provider calls、GMGN 16/84 失败、BSC indexing 8.7%、credits 4 个采样点，结论为 `hold_shadow`）
+- [ ] 11.6 基于累计样本完成训练/最近验证切片、参数敏感性、预算模拟和 S1 风险政策人工评审；未通过前保持 Shadow。（只读评审已固化：总样本 145 calls，最近 5 分钟 GMGN 35/0 失败但 BSC indexing 7/300，累计 GMGN 16/84 失败、BSC indexing 8.7%、credits 4 个采样点；无 Outcome 标签，参数敏感性不可估计，S1 全部关闭，结论为 `hold_shadow`）
 - [ ] 11.7 production 配置经本地修改、main/CI 和服务器拉取部署后，核对 commit/config hash/schema/锚点/健康并记录放行结果。

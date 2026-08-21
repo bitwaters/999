@@ -14,6 +14,8 @@
     "replay:report": "node scripts/replay-report.mjs",
     "provider:contract": "node --import tsx src/providers/contract-check.ts",
     "sampling:audit": "node scripts/sampling-audit.mjs",
+    "sampling:review": "node scripts/sampling-review.mjs",
+    "provider:gmgn-load": "node scripts/gmgn-load-check.mjs",
     "format": "prettier --write package.json tsconfig.json tsconfig.build.json eslint.config.mjs .prettierrc.json config src",
     "format:check": "prettier --check package.json tsconfig.json tsconfig.build.json eslint.config.mjs .prettierrc.json config src",
     "lint": "eslint .",

@@ -513,7 +513,7 @@ replay 必须使用严格事件时间轴：任一决策只能读取在该模拟�
 
 ## 16. 单一配置源
 
-唯一 live 业务配置：`config/bot.yaml`。replay 的候选快照是数据库中的不可变评估输入，不是第二个运行配置源，也不能覆盖当前 Bot。下列 YAML 只表达单一配置的固定顶层结构，故意省略业务值且不能直接启动；实际文件必须通过 Schema 列出的全部必填项，代码不得因这里的 `{}` 或空值补隐藏默认值。
+唯一静态 live 业务配置：`config/bot.yaml`。replay 的候选快照是数据库中的不可变评估输入，不是第二个运行配置源，也不能覆盖当前 Bot。服务器 Telegram destination binding（管理员用户/私聊、频道、群组 ID）只作为部署接线从 `.env` 注入，不得用于覆盖策略、风控或运行模式；容器化启动要求四个 binding 同时存在。下列 YAML 只表达单一配置的固定顶层结构，故意省略业务值且不能直接启动；实际文件必须通过 Schema 列出的全部必填项，代码不得因这里的 `{}` 或空值补隐藏默认值。
 
 ```yaml
 meta: {}
@@ -561,7 +561,7 @@ delivery:
 - 所有 Telegram chat/user ID 在 YAML、领域对象和数据库中均保存为十进制字符串，不转 JavaScript `number`；
 - credits 比例合计 100%；
 - 所有窗口、阈值、TTL、冷却、风险策略配置化；ENTRY 投递 TTL 初始 Shadow 值 30s；REPORT/SYSTEM 最大投递年龄与尝试次数、G2 ingest 队列水位、event-loop lag 门槛、单次 SQLite 写事务行数/耗时上界、entry 时间容忍、`outcome_max_lateness_seconds`、`replay_delivery_delay_ms`、replay 写入批次/busy timeout 也只来自该配置；
-- secrets 只来自环境变量；
+- API secrets 和服务器 Telegram destination binding 只来自环境变量；环境变量不得覆盖业务策略、风控参数或 `global.run_mode`；
 - `global.run_mode` 只能在本地配置文件中修改并重新部署，Telegram 和服务器环境变量不能覆盖；
 - storage 统一定义备份频率/保留、临时 replay snapshot 目录、磁盘水位和最大允许时钟偏差；第一版不自动删除或薄化主库的 provider events、trades、candles 和 Outcome 样本，磁盘水位触发暂停与告警而不是删数据；路径本身由部署接线提供，不能在业务代码写死；
 - 启动和正式 replay 时规范化并写入 `rule_config_versions(id, config_hash, git_commit, run_mode, yaml_snapshot, created_at)`，身份由 `config_hash + git_commit + run_mode` 确定；
@@ -672,7 +672,7 @@ deploy/                         Docker Compose 与版本化部署脚本
 
 部署前只做一个保护：工作区存在未提交或未跟踪文件时停止部署，避免 `git pull` 覆盖服务器修改。正常部署脚本保持简短，只负责拉取、构建、启动和健康检查。
 
-API key、Telegram token 等 secrets 保存在服务器 `.env` 或 secret store，不进入 Git；`.env*`、数据库、WAL、日志和备份必须在 `.gitignore` 中，仓库只提供无真实值的 `.env.example`。
+API key、Telegram token 和 Telegram destination binding 保存在服务器 `.env` 或 secret store，不进入 Git；`.env*`、数据库、WAL、日志和备份必须在 `.gitignore` 中，仓库只提供无真实值的 `.env.example`。
 
 部署失败时不在服务器修代码。回到本地修复或执行 `git revert`，push main 后让服务器重新拉取部署。
 

@@ -29,7 +29,11 @@ export function loadReplayConfig(input: ReplayConfigInput): LoadedConfig {
     throw new Error('Saved replay config requires explicit --set overrides');
   const base = input.savedConfigYaml ?? input.currentBotYaml!;
   const text = overrides.length === 0 ? base : applyOverrides(base, overrides);
-  return parseConfigText(text, input.gitCwd);
+  return parseConfigText(
+    text,
+    input.gitCwd,
+    process.env.CONTAINERIZED_RUN === '1' ? process.env : undefined,
+  );
 }
 
 function applyOverrides(yamlText: string, overrides: readonly string[]): string {

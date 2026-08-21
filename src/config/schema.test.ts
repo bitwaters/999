@@ -110,6 +110,38 @@ test('requires non-blank secret environment values without exposing them', () =>
   );
 });
 
+test('resolves Telegram destinations from complete runtime environment without changing source YAML', () => {
+  const loaded = parseConfigText(template, process.cwd(), {
+    TELEGRAM_ADMIN_USER_IDS: '101, 102',
+    TELEGRAM_ADMIN_CHAT_ID: '101',
+    TELEGRAM_CHANNEL_CHAT_ID: '-1001',
+    TELEGRAM_GROUP_CHAT_ID: '-1002',
+  });
+  assert.deepEqual(loaded.config.delivery.admin_private.allowed_user_ids, ['101', '102']);
+  assert.equal(loaded.config.delivery.admin_private.chat_id, '101');
+  assert.equal(loaded.config.delivery.channel.chat_id, '-1001');
+  assert.equal(loaded.config.delivery.group.chat_id, '-1002');
+  assert.doesNotMatch(template, /(?:101|102|-1001|-1002)/u);
+});
+
+test('rejects partial Telegram destination environment', () => {
+  assert.throws(
+    () =>
+      parseConfigText(template, process.cwd(), {
+        TELEGRAM_ADMIN_USER_IDS: '101',
+        TELEGRAM_ADMIN_CHAT_ID: '101',
+      }),
+    /Telegram destination environment variables must be provided together/u,
+  );
+});
+
+test('requires Telegram destination environment when runtime resolution is enabled', () => {
+  assert.throws(
+    () => parseConfigText(template, process.cwd(), {}),
+    /Telegram destination environment variables are required at runtime/u,
+  );
+});
+
 test('produces the same config hash regardless of YAML key order', () => {
   const value = record(YAML.parse(template));
   const reordered = Object.fromEntries(Object.entries(value).reverse());

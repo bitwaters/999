@@ -33,11 +33,11 @@
 
 ### 2. 使用一个严格 YAML 配置与不可变配置版本
 
-`config/bot.yaml` 是唯一业务配置。Zod Schema 负责类型、必填、白名单、范围和跨字段校验，不提供隐藏业务默认值。SOL/BSC 即使数值相同也分别填写；secrets 由环境变量注入。应用在启动/replay 时规范化配置，计算 hash，并与 Git commit、run mode、完整快照一起写入 `rule_config_versions`。
+`config/bot.yaml` 是唯一静态业务配置。Zod Schema 负责类型、必填、白名单、范围和跨字段校验，不提供隐藏业务默认值。SOL/BSC 即使数值相同也分别填写；API secrets 和服务器 Telegram destination bindings 由环境变量注入，容器化启动要求四个 destination binding 同时存在。应用在启动/replay 时解析并规范化最终配置，计算 hash，并与 Git commit、run mode、完整快照一起写入 `rule_config_versions`。
 
 Shadow 固定以管理员私聊为锚点并关闭频道/群组 ENTRY；production 仍走相同 pipeline、Outbox 和 renderer，只按配置选择锚点与镜像。Telegram chat/user ID 全程使用十进制字符串。
 
-替代方案：环境变量覆盖业务参数会形成不可追溯的第二配置源；把链公共安全字段抽到 common 会增加串链风险；数据库在线调参会破坏本地—main—服务器交付纪律。
+替代方案：让环境变量覆盖策略阈值等业务参数会形成不可追溯的第二配置源；本方案只允许环境变量绑定部署目标身份，不允许覆盖策略和风控参数；把链公共安全字段抽到 common 会增加串链风险；数据库在线调参会破坏本地—main—服务器交付纪律。
 
 ### 3. 使用 SQLite WAL、10 张表和短事务单写者
 

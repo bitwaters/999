@@ -11,6 +11,7 @@ import {
   gmgnHotSearchesRawSchema,
   coingeckoPoolBatchRawSchema,
   coingeckoTradesRawSchema,
+  coingeckoG2RawSchema,
 } from '../providers/raw-schemas.js';
 import { CandidateCycleTracker, type DiscoveryObservation } from '../pipeline/candidate.js';
 import { readDiskHealth } from '../runtime/health.js';
@@ -23,7 +24,16 @@ import {
   poolRawForAddress,
   poolRawsForToken,
 } from '../providers/coingecko-adapter.js';
-import { parseLevel1Snapshot, type Level1Snapshot } from '../market-data/level1.js';
+import { isLevel1Fresh, parseLevel1Snapshot, type Level1Snapshot } from '../market-data/level1.js';
+import { CoinGeckoG2Client } from '../providers/coingecko-g2.js';
+import { evaluateAttention } from '../pipeline/ace.js';
+import {
+  G2IngestQueue,
+  TradeDeduper,
+  hashG2Message,
+  normalizeG2Item,
+  type RawG2Item,
+} from '../market-data/g2.js';
 
 type ProbeState = 'ok' | 'failed' | 'unknown';
 type ProbeLogger = (
@@ -31,6 +41,12 @@ type ProbeLogger = (
   event: string,
   fields?: Record<string, unknown>,
 ) => void;
+
+type PendingG2 = {
+  raw: RawG2Item;
+  observedAt: number;
+  providerEventId: number;
+};
 
 export type ProviderProbeStatus = {
   provider: ProbeState;
@@ -60,6 +76,13 @@ export class ProviderProbe {
   private safety: ProbeState = 'unknown';
   private level1: ProbeState = 'unknown';
   private readonly level1Snapshots = new Map<string, Level1Snapshot>();
+  private readonly level1Pools = new Map<string, CanonicalPool>();
+  private readonly g2Queue: G2IngestQueue<PendingG2>;
+  private readonly g2Deduper = new TradeDeduper();
+  private g2Client: CoinGeckoG2Client | undefined;
+  private g2DrainScheduled = false;
+  private g2DrainInFlight: Promise<void> | undefined;
+  private g2QueueIncomplete = false;
   private telegram: ProbeState = 'unknown';
   private lastProbeAt: number | undefined;
   private lastError: string | undefined;
@@ -74,6 +97,24 @@ export class ProviderProbe {
       sol: new CandidateCycleTracker(options.config.chains.sol.discovery.candidate_ttl_seconds),
       bsc: new CandidateCycleTracker(options.config.chains.bsc.discovery.candidate_ttl_seconds),
     };
+    this.g2Queue = new G2IngestQueue(
+      options.config.runtime.g2_queue.capacity,
+      options.config.runtime.g2_queue.high_watermark,
+      options.config.runtime.g2_queue.hard_limit,
+      {
+        onHighWatermark: () => {
+          this.options.logger('warn', 'g2_queue_high_watermark', {
+            size: this.g2Queue.size(),
+          });
+        },
+        onHardLimit: () => {
+          this.g2QueueIncomplete = true;
+          this.options.logger('error', 'g2_queue_hard_limit', {
+            size: this.g2Queue.size(),
+          });
+        },
+      },
+    );
   }
 
   public start(): void {
@@ -92,6 +133,8 @@ export class ProviderProbe {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     await this.inFlight;
+    await this.g2DrainInFlight;
+    await this.g2Client?.stop();
   }
 
   public status(): ProviderProbeStatus {
@@ -104,7 +147,7 @@ export class ProviderProbe {
           : 'unknown',
       safety: this.safety,
       level1: this.level1,
-      g2: 'unknown',
+      g2: this.g2QueueIncomplete ? 'failed' : (this.g2Client?.status() ?? 'unknown'),
       telegram: this.telegram,
       ...(this.lastProbeAt === undefined ? {} : { lastProbeAt: this.lastProbeAt }),
       ...(this.lastError === undefined ? {} : { lastError: this.lastError }),
@@ -421,6 +464,7 @@ export class ProviderProbe {
       );
       await this.resolveCoinGeckoPools(key);
       await this.refreshLevel1(key);
+      await this.armEligibleCandidates(key);
       this.coingecko = 'ok';
     } catch (error) {
       this.coingecko = 'failed';
@@ -534,11 +578,13 @@ export class ProviderProbe {
         if (level1.status !== 'complete') continue;
         complete += 1;
         this.level1Snapshots.set(parsedPool.pool.identityKey, level1.snapshot);
+        this.level1Pools.set(`${chain}:${row.pool_address}:${row.token_address}`, parsedPool.pool);
         boundedWrite(this.options.database, this.options.writeBudget, (context) => {
           const info = this.options.database
             .prepare(
               `UPDATE candidates SET funnel_status = 'level1_checked', updated_at = ?
-               WHERE chain = ? AND token_address = ? AND pool_address = ? AND safety_status = 'pass'`,
+               WHERE chain = ? AND token_address = ? AND pool_address = ? AND safety_status = 'pass'
+                 AND funnel_status != 'armed'`,
             )
             .run(observedAt, chain, row.token_address, row.pool_address);
           context.addRows(info.changes);
@@ -548,6 +594,176 @@ export class ProviderProbe {
     }
     this.level1 =
       complete > 0 && complete === attempted ? 'ok' : attempted > 0 ? 'failed' : 'unknown';
+  }
+
+  private async armEligibleCandidates(key: string): Promise<void> {
+    const rows = this.options.database
+      .prepare(
+        `SELECT chain, token_address, pool_address FROM candidates
+         WHERE safety_status = 'pass' AND status != 'expired' AND funnel_status = 'level1_checked'
+         ORDER BY updated_at DESC LIMIT ?`,
+      )
+      .all(this.options.config.providers.coingecko.max_pools_per_batch * 2) as Array<{
+      chain: 'sol' | 'bsc';
+      token_address: string;
+      pool_address: string;
+    }>;
+    const pools: CanonicalPool[] = [];
+    for (const row of rows) {
+      const pool = this.level1Pools.get(`${row.chain}:${row.pool_address}:${row.token_address}`);
+      const cycle = this.trackers[row.chain].get(row.chain, row.token_address);
+      const snapshot = pool ? this.level1Snapshots.get(pool.identityKey) : undefined;
+      if (
+        !pool ||
+        !cycle ||
+        !snapshot ||
+        !isLevel1Fresh(
+          snapshot,
+          Date.now(),
+          this.options.config.chains[row.chain].level1.buyers_freshness_seconds,
+        )
+      )
+        continue;
+      const attention = evaluateAttention(
+        attentionInput(cycle.evidence),
+        this.options.config.strategies.emerging_breakout.attention,
+      );
+      if (attention.status !== 'pass') continue;
+      pools.push(pool);
+    }
+    if (pools.length === 0) return;
+    this.g2Client ??= new CoinGeckoG2Client({
+      websocketUrl: this.options.config.providers.coingecko.websocket_url,
+      apiKey: key,
+      maxSubscriptions: this.options.config.providers.coingecko.g2.max_subscriptions_per_socket,
+      maxResponseBytes: this.options.config.providers.coingecko.max_response_bytes,
+      connectTimeoutMs: this.options.config.providers.coingecko.request_timeout_ms,
+      reconnectDelayMs: 1_000,
+      logger: this.options.logger,
+      onMessage: (message, observedAt) => this.recordG2Message(message, observedAt),
+    });
+    await this.g2Client.start();
+    for (const pool of pools) {
+      const result = this.g2Client.request(pool, 'armed');
+      if (result === 'rejected_capacity') continue;
+      boundedWrite(this.options.database, this.options.writeBudget, (context) => {
+        const info = this.options.database
+          .prepare(
+            `UPDATE candidates SET status = 'armed', funnel_status = 'armed', updated_at = ?
+             WHERE chain = ? AND token_address = ? AND pool_address = ? AND safety_status = 'pass'`,
+          )
+          .run(Date.now(), pool.chain, pool.tokenAddress, pool.poolAddress);
+        context.addRows(info.changes);
+      });
+    }
+  }
+
+  private recordG2Message(message: Record<string, unknown>, observedAt: number): void {
+    const parsed = coingeckoG2RawSchema.safeParse(message);
+    if (!parsed.success) {
+      this.markG2Incomplete('schema:rejected');
+      return;
+    }
+    const network = parsed.data.n;
+    const poolAddress = parsed.data.pa;
+    const chain = network === 'solana' ? 'sol' : 'bsc';
+    const providerEvent = insertProviderEvent(
+      this.options.database,
+      {
+        provider: 'coingecko',
+        capability: 'G2',
+        chain,
+        poolAddress,
+        observedAt,
+        ...(typeof parsed.data.t === 'number' ? { eventAt: parsed.data.t } : {}),
+        schemaVersion: 'coingecko.g2.v1',
+        payload: JSON.stringify(parsed.data),
+        billingBucket: 'g2_confirmation',
+        requestMeta: { endpoint_name: 'OnchainTrade', method: 'WebSocket' },
+      },
+      this.options.writeBudget,
+    );
+    const result = this.g2Queue.enqueue(
+      { raw: parsed.data, observedAt, providerEventId: providerEvent.id },
+      observedAt,
+      1,
+    );
+    if (!result.accepted) return;
+    this.scheduleG2Drain();
+  }
+
+  private scheduleG2Drain(): void {
+    if (this.g2DrainScheduled) return;
+    this.g2DrainScheduled = true;
+    setImmediate(() => {
+      this.g2DrainScheduled = false;
+      this.g2DrainInFlight = this.drainG2().finally(() => {
+        this.g2DrainInFlight = undefined;
+      });
+    });
+  }
+
+  private async drainG2(): Promise<void> {
+    const items = this.g2Queue.drain(this.g2Queue.size());
+    for (const item of items) {
+      const network = item.value.raw.n;
+      const chain = network === 'solana' ? 'sol' : 'bsc';
+      const pool = [...this.level1Pools.values()].find(
+        (candidate) => candidate.chain === chain && candidate.poolAddress === item.value.raw.pa,
+      );
+      if (!pool) {
+        this.markG2Incomplete('identity:unknown_pool');
+        continue;
+      }
+      const parsed = normalizeG2Item(item.value.raw, pool, item.value.observedAt);
+      if (parsed.status !== 'complete') {
+        this.markG2Incomplete(parsed.reason);
+        continue;
+      }
+      const deduped = this.g2Deduper.ingest(hashG2Message(item.value.raw), [parsed.trade]);
+      for (const trade of deduped.trades)
+        boundedWrite(this.options.database, this.options.writeBudget, (context) => {
+          const info = this.options.database
+            .prepare(
+              `INSERT OR IGNORE INTO trades
+               (provider_event_id, chain, pool_address, token_address, raw_side, target_side,
+                token_amount, quote_amount, volume_usd, price_usd, event_at, observed_at,
+                tx_hash, provider_trade_id, log_index, leg_index, item_index, identity_key,
+                dedup_status, ambiguity_status, parser_version)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              item.value.providerEventId,
+              trade.chain,
+              trade.poolAddress,
+              trade.tokenAddress,
+              trade.rawSide,
+              trade.targetSide,
+              trade.tokenAmount,
+              trade.quoteAmount,
+              trade.quoteAmount,
+              trade.priceUsd,
+              trade.eventAt,
+              trade.observedAt,
+              trade.txHash ?? null,
+              trade.providerTradeId ?? null,
+              trade.logIndex ?? null,
+              trade.legIndex ?? null,
+              trade.itemIndex,
+              trade.identityKey ?? null,
+              trade.dedupStatus,
+              trade.ambiguityStatus,
+              'coingecko.g2.v1',
+            );
+          context.addRows(info.changes);
+        });
+    }
+  }
+
+  private markG2Incomplete(reason: string): void {
+    this.g2QueueIncomplete = true;
+    this.g2Queue.markIncomplete(reason);
+    this.options.logger('warn', 'g2_evidence_incomplete', { reason });
   }
 
   private async resolveCoinGeckoPools(key: string): Promise<void> {
@@ -749,6 +965,34 @@ function redact(value: string, secrets: readonly string[]): string {
 
 function readSafeInteger(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function attentionInput(evidence: readonly DiscoveryObservation[]): {
+  rankBefore?: number;
+  rankAfter?: number;
+  visitingBefore?: number;
+  visitingAfter?: number;
+} {
+  const bySource = new Map<string, DiscoveryObservation[]>();
+  for (const item of evidence)
+    bySource.set(item.source, [...(bySource.get(item.source) ?? []), item]);
+  const choices = [...bySource.values()]
+    .map((items) => items.sort((left, right) => left.observedAt - right.observedAt))
+    .filter((items) => items.length >= 2)
+    .sort((left, right) => right.at(-1)!.observedAt - left.at(-1)!.observedAt);
+  const selected = choices[0];
+  if (!selected) return {};
+  const previous = selected.at(-2)!;
+  const latest = selected.at(-1)!;
+  return selected[0]!.source === 'hot_searches'
+    ? {
+        ...(previous.visitingCount === undefined ? {} : { visitingBefore: previous.visitingCount }),
+        ...(latest.visitingCount === undefined ? {} : { visitingAfter: latest.visitingCount }),
+      }
+    : {
+        ...(previous.rank === undefined ? {} : { rankBefore: previous.rank }),
+        ...(latest.rank === undefined ? {} : { rankAfter: latest.rank }),
+      };
 }
 
 function dedupePools(

@@ -126,6 +126,7 @@ export class CoinGeckoG2Client {
         if (this.socket === socket) this.socket = undefined;
         this.confirmed = false;
         this.manager.disconnect();
+        if (!this.stopping) this.fail('g2_socket_closed');
         if (!settled) {
           settled = true;
           reject(new Error('CoinGecko G2 socket closed before connect'));

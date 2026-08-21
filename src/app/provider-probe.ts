@@ -761,7 +761,7 @@ export class ProviderProbe {
       .prepare(
         `SELECT s.id AS signal_id, s.config_version_id, s.snapshot_json, s.pre_send_drift,
                 c.chain, c.token_address, c.pool_address, c.target_side,
-                o.status AS anchor_status, o.sent_at
+                o.status AS anchor_status, o.sent_at, o.delivery_uncertain
          FROM signals s
          JOIN candidates c ON c.id = s.candidate_id
          JOIN delivery_outbox o ON o.signal_id = s.id
@@ -781,12 +781,18 @@ export class ProviderProbe {
       target_side: 'base' | 'quote' | null;
       anchor_status: 'sent' | 'expired';
       sent_at: number | null;
+      delivery_uncertain: number;
     }>;
     for (const row of rows) {
+      if (row.delivery_uncertain === 1) {
+        this.expireSignal(row.signal_id, 'anchor:delivery_uncertain');
+        continue;
+      }
       if (row.anchor_status === 'expired' || row.sent_at === null) {
         this.expireSignal(row.signal_id, 'anchor:expired');
         continue;
       }
+      this.markSignalDelivered(row.signal_id);
       const signal = parseSignalSnapshot(row.snapshot_json);
       const pool = row.pool_address
         ? [...this.level1Pools.values()].find(
@@ -1019,6 +1025,25 @@ export class ProviderProbe {
       context.addRows(signal.changes + candidate.changes);
     });
     this.unsetSignalG2(signalId);
+  }
+
+  private markSignalDelivered(signalId: number): void {
+    boundedWrite(this.options.database, this.options.writeBudget, (context) => {
+      const signal = this.options.database
+        .prepare(
+          `UPDATE signals SET status = 'delivered'
+           WHERE id = ? AND status = 'confirmed-pending-anchor'`,
+        )
+        .run(signalId);
+      const candidate = this.options.database
+        .prepare(
+          `UPDATE candidates SET status = 'delivered', funnel_status = 'delivered', updated_at = ?
+           WHERE id = (SELECT candidate_id FROM signals WHERE id = ?)
+             AND status = 'confirmed-pending-anchor'`,
+        )
+        .run(Date.now(), signalId);
+      context.addRows(signal.changes + candidate.changes);
+    });
   }
 
   private completeSignal(signalId: number): void {

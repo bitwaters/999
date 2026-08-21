@@ -104,8 +104,8 @@ async function probe(name, chain, apiKey) {
   }
 }
 
-const envText = await readFile(path.join(root, '.env.preflight'), 'utf8');
-const apiKey = envValue(envText, 'GMGN_API_KEY');
+const envText = await readFile(path.join(root, '.env.preflight'), 'utf8').catch(() => '');
+const apiKey = process.env.GMGN_API_KEY?.trim() || envValue(envText, 'GMGN_API_KEY');
 if (!apiKey) throw new Error('缺少 GMGN_API_KEY');
 if (
   ![pacingMs, pacedCalls, concurrency].every(Number.isFinite) ||

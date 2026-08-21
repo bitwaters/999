@@ -125,6 +125,8 @@ export class BotRuntime {
       this.logger('error', 'runtime_health_failed', {
         error: error instanceof Error ? error.message : String(error),
       });
+    } finally {
+      this.lagMonitor.resetWindow();
     }
   }
 

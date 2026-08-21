@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync, rmSync } from 'node:fs';
+import { setPriority } from 'node:os';
 import path from 'node:path';
 import { gunzipSync } from 'node:zlib';
 
@@ -89,6 +90,11 @@ async function loadRuntime() {
 }
 
 async function runReplayCommand(values) {
+  try {
+    setPriority(0, 10);
+  } catch {
+    throw new Error('replay could not lower its CPU scheduling priority');
+  }
   const runtime = await loadRuntime();
   const {
     database,
@@ -264,6 +270,7 @@ function replayShouldYield(databasePath) {
     const health = JSON.parse(readFileSync(healthPath, 'utf8'));
     return (
       health?.components?.sqlite !== 'ok' ||
+      health?.components?.event_loop !== 'ok' ||
       health?.disk?.highWater === true ||
       health?.provider_probe?.g2QueueHighWater === true
     );

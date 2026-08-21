@@ -805,8 +805,8 @@ export class ProviderProbe {
         )
       )
         continue;
-      const attention = evaluateAttention(
-        attentionInput(cycle.evidence),
+      const attention = evaluateCandidateAttention(
+        cycle.evidence,
         this.options.config.strategies.emerging_breakout.attention,
       );
       if (!canArmG2Candidate(row.status, row.funnel_status, attention.status)) continue;
@@ -1315,8 +1315,8 @@ export class ProviderProbe {
           ? { previousLevel1: this.previousLevel1Snapshots.get(pool.identityKey)! }
           : {}),
         g2,
-        attention: evaluateAttention(
-          attentionInput(cycle.evidence),
+        attention: evaluateCandidateAttention(
+          cycle.evidence,
           this.options.config.strategies.emerging_breakout.attention,
         ),
         confirmedAt: now,
@@ -1596,32 +1596,46 @@ function readSafeInteger(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
-function attentionInput(evidence: readonly DiscoveryObservation[]): {
+export function evaluateCandidateAttention(
+  evidence: readonly DiscoveryObservation[],
+  config: BotConfig['strategies']['emerging_breakout']['attention'],
+): ReturnType<typeof evaluateAttention> {
+  const decisions = attentionInputs(evidence).map((input) => evaluateAttention(input, config));
+  if (decisions.length === 0) return { status: 'incomplete', reasons: ['missing:attention'] };
+  if (decisions.some((decision) => decision.status === 'pass')) return { status: 'pass', reasons: [] };
+  const reasons = [...new Set(decisions.flatMap((decision) => decision.reasons))];
+  if (decisions.some((decision) => decision.status === 'incomplete'))
+    return { status: 'incomplete', reasons: reasons.length > 0 ? reasons : ['missing:attention'] };
+  return { status: 'rejected', reasons: reasons.length > 0 ? reasons : ['rejected:attention'] };
+}
+
+function attentionInputs(evidence: readonly DiscoveryObservation[]): Array<{
   rankBefore?: number;
   rankAfter?: number;
   visitingBefore?: number;
   visitingAfter?: number;
-} {
+}> {
   const bySource = new Map<string, DiscoveryObservation[]>();
   for (const item of evidence)
     bySource.set(item.source, [...(bySource.get(item.source) ?? []), item]);
-  const choices = [...bySource.values()]
+  return [...bySource.values()]
     .map((items) => items.sort((left, right) => left.observedAt - right.observedAt))
     .filter((items) => items.length >= 2)
-    .sort((left, right) => right.at(-1)!.observedAt - left.at(-1)!.observedAt);
-  const selected = choices[0];
-  if (!selected) return {};
-  const previous = selected.at(-2)!;
-  const latest = selected.at(-1)!;
-  return selected[0]!.source === 'hot_searches'
-    ? {
-        ...(previous.visitingCount === undefined ? {} : { visitingBefore: previous.visitingCount }),
-        ...(latest.visitingCount === undefined ? {} : { visitingAfter: latest.visitingCount }),
-      }
-    : {
-        ...(previous.rank === undefined ? {} : { rankBefore: previous.rank }),
-        ...(latest.rank === undefined ? {} : { rankAfter: latest.rank }),
-      };
+    .map((items) => {
+      const previous = items.at(-2)!;
+      const latest = items.at(-1)!;
+      return items[0]!.source === 'hot_searches'
+        ? {
+            ...(previous.visitingCount === undefined
+              ? {}
+              : { visitingBefore: previous.visitingCount }),
+            ...(latest.visitingCount === undefined ? {} : { visitingAfter: latest.visitingCount }),
+          }
+        : {
+            ...(previous.rank === undefined ? {} : { rankBefore: previous.rank }),
+            ...(latest.rank === undefined ? {} : { rankAfter: latest.rank }),
+          };
+    });
 }
 
 function parseSafety(value: string): SafetyResult | undefined {

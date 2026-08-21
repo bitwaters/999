@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   canArmG2Candidate,
+  evaluateCandidateAttention,
   g2ProbeState,
   latestLevel1ObservedAt,
   selectArmCandidateRows,
@@ -35,6 +36,52 @@ test('persisted Armed candidates do not require a new Attention increase to rear
   assert.equal(canArmG2Candidate('armed', 'armed', 'rejected'), true);
   assert.equal(canArmG2Candidate('scouting', 'level1_checked', 'incomplete'), false);
   assert.equal(canArmG2Candidate('expired', 'armed', 'pass'), false);
+});
+
+test('candidate Attention accepts improvement from any allowed discovery source', () => {
+  const attentionConfig = {
+    max_rank: 20,
+    min_rank_improvement: 1,
+    min_hot_search_growth: 1,
+  } as const;
+  const evidence = [
+    {
+      chain: 'bsc' as const,
+      tokenAddress: '0x1',
+      source: 'trending_1m' as const,
+      observedAt: 1,
+      rank: 12,
+    },
+    {
+      chain: 'bsc' as const,
+      tokenAddress: '0x1',
+      source: 'trending_1m' as const,
+      observedAt: 2,
+      rank: 6,
+    },
+    {
+      chain: 'bsc' as const,
+      tokenAddress: '0x1',
+      source: 'hot_searches' as const,
+      observedAt: 3,
+      visitingCount: 46,
+    },
+    {
+      chain: 'bsc' as const,
+      tokenAddress: '0x1',
+      source: 'hot_searches' as const,
+      observedAt: 4,
+      visitingCount: 46,
+    },
+  ];
+  assert.deepEqual(evaluateCandidateAttention(evidence, attentionConfig), {
+    status: 'pass',
+    reasons: [],
+  });
+  assert.deepEqual(evaluateCandidateAttention([], attentionConfig), {
+    status: 'incomplete',
+    reasons: ['missing:attention'],
+  });
 });
 
 test('Level 1 and G2 selection deduplicate pools and prioritize active candidates', () => {

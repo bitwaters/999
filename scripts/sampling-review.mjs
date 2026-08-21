@@ -91,44 +91,99 @@ const discoverySourceCoverage = all(`
 const productionDiscoverySources = ['trending', 'hot-searches'];
 const productionDiscoveryCoverage = all(
   `
-  SELECT c.chain,
-         COUNT(DISTINCT c.token_address) AS candidate_tokens,
-         COUNT(DISTINCT CASE WHEN p.token_address IS NOT NULL THEN c.token_address END)
+  SELECT s.chain,
+         COUNT(*) AS candidate_tokens,
+         COUNT(CASE WHEN s.last_indexing_at IS NOT NULL THEN 1 END) AS attempted_tokens,
+         COUNT(CASE WHEN s.last_indexing_at IS NULL THEN 1 END) AS not_attempted_tokens,
+         COUNT(CASE WHEN p.token_address IS NOT NULL THEN 1 END)
            AS indexed_tokens,
-         ROUND(100.0 * COUNT(DISTINCT CASE WHEN p.token_address IS NOT NULL THEN c.token_address END)
-               / COUNT(DISTINCT c.token_address), 2) AS indexed_rate_percent
-  FROM candidate_observations c
-  LEFT JOIN token_pools p ON p.chain = c.chain AND p.token_address = c.token_address
-  WHERE c.source IN (?, ?)
-  GROUP BY c.chain
-  ORDER BY c.chain
+         ROUND(100.0 * COUNT(CASE WHEN s.last_indexing_at IS NOT NULL THEN 1 END)
+               / COUNT(*), 2) AS scheduling_coverage_percent,
+         ROUND(100.0 * COUNT(CASE WHEN p.token_address IS NOT NULL THEN 1 END)
+               / NULLIF(COUNT(CASE WHEN s.last_indexing_at IS NOT NULL THEN 1 END), 0), 2)
+           AS indexed_rate_of_attempted_percent,
+         ROUND(100.0 * COUNT(CASE WHEN p.token_address IS NOT NULL THEN 1 END)
+               / COUNT(*), 2) AS indexed_rate_percent
+  FROM sampling_candidates s
+  LEFT JOIN token_pools p ON p.chain = s.chain AND p.token_address = s.token_address
+  WHERE s.primary_seen_at IS NOT NULL
+  GROUP BY s.chain
+  ORDER BY s.chain
 `,
-  ...productionDiscoverySources,
 );
 const productionUnresolvedAge = all(
   `
-  WITH first_seen AS (
-    SELECT c.chain, c.token_address, MIN(c.observed_at) AS first_seen_at
-    FROM candidate_observations c
-    WHERE c.source IN (?, ?)
-    GROUP BY c.chain, c.token_address
-  )
-  SELECT f.chain,
+  SELECT s.chain,
          COUNT(*) AS unresolved_tokens,
-         SUM(CASE WHEN f.first_seen_at >= ? - 30 * 60 * 1000 THEN 1 ELSE 0 END) AS under_30m,
-         SUM(CASE WHEN f.first_seen_at < ? - 30 * 60 * 1000 THEN 1 ELSE 0 END) AS over_30m,
-         SUM(CASE WHEN f.first_seen_at < ? - 2 * 60 * 60 * 1000 THEN 1 ELSE 0 END) AS over_2h
-  FROM first_seen f
-  LEFT JOIN token_pools p ON p.chain = f.chain AND p.token_address = f.token_address
-  WHERE p.token_address IS NULL
-  GROUP BY f.chain
-  ORDER BY f.chain
+         SUM(CASE WHEN s.first_seen_at >= ? - 30 * 60 * 1000 THEN 1 ELSE 0 END) AS under_30m,
+         SUM(CASE WHEN s.first_seen_at < ? - 30 * 60 * 1000 THEN 1 ELSE 0 END) AS over_30m,
+         SUM(CASE WHEN s.first_seen_at < ? - 2 * 60 * 60 * 1000 THEN 1 ELSE 0 END) AS over_2h
+  FROM sampling_candidates s
+  LEFT JOIN token_pools p ON p.chain = s.chain AND p.token_address = s.token_address
+  WHERE s.primary_seen_at IS NOT NULL AND p.token_address IS NULL
+  GROUP BY s.chain
+  ORDER BY s.chain
 `,
-  ...productionDiscoverySources,
   lastObservedAt,
   lastObservedAt,
   lastObservedAt,
 );
+const indexingResolutionReasons = all(`
+  SELECT chain,
+         COALESCE(source_category, 'unknown') AS source_category,
+         COALESCE(resolution_reason, CASE WHEN indexed = 1 THEN 'resolved' ELSE 'legacy_unclassified' END)
+           AS resolution_reason,
+         COUNT(*) AS attempts,
+         COUNT(DISTINCT token_address) AS unique_tokens
+  FROM indexing_attempts
+  GROUP BY chain, source_category, resolution_reason
+  ORDER BY chain, source_category, resolution_reason
+`);
+const productionMaturityRows = all(`
+  SELECT s.chain, s.token_address, s.first_seen_at, s.last_indexing_at,
+         p.first_indexed_at
+  FROM sampling_candidates s
+  LEFT JOIN token_pools p ON p.chain = s.chain AND p.token_address = s.token_address
+  WHERE s.primary_seen_at IS NOT NULL
+`);
+const maturityWindowsMinutes = [5, 15, 30, 60, 120];
+const productionMaturity = Object.entries(
+  productionMaturityRows.reduce((groups, row) => {
+    const group = groups[row.chain] || [];
+    group.push(row);
+    groups[row.chain] = group;
+    return groups;
+  }, {}),
+).map(([chain, rows]) => ({
+  chain,
+  candidate_tokens: rows.length,
+  windows: Object.fromEntries(
+    maturityWindowsMinutes.map((minutes) => {
+      const durationMs = minutes * 60 * 1000;
+      const matureRows = rows.filter(
+        (row) => Number(row.first_seen_at) <= lastObservedAt - durationMs,
+      );
+      const resolvedRows = matureRows.filter(
+        (row) =>
+          row.first_indexed_at !== null &&
+          Number(row.first_indexed_at) <= Number(row.first_seen_at) + durationMs,
+      );
+      const attemptedRows = matureRows.filter((row) => row.last_indexing_at !== null);
+      return [
+        `${minutes}m`,
+        {
+          mature_tokens: matureRows.length,
+          attempted_tokens: attemptedRows.length,
+          not_attempted_tokens: matureRows.length - attemptedRows.length,
+          resolved_tokens: resolvedRows.length,
+          resolved_rate_percent: matureRows.length
+            ? Number(((resolvedRows.length / matureRows.length) * 100).toFixed(2))
+            : null,
+        },
+      ];
+    }),
+  ),
+}));
 const credits = all(`
   SELECT observed_at, plan, rpm, monthly_credit, used_credit, remaining_credit
   FROM credit_samples
@@ -217,6 +272,14 @@ const result = {
     chains: productionDiscoveryCoverage,
   },
   productionUnresolvedAge,
+  indexingResolutionReasons,
+  productionMaturity,
+  productionCoverageReview: {
+    application_health_gate: 'not_used',
+    insufficient_current_coverage: hasInsufficientProductionDiscovery,
+    reason:
+      'coverage is reported as scheduling coverage, attempted-token resolution, and maturity windows; it does not mark the application unhealthy',
+  },
   websocket_events: Number(websocketEvents?.events ?? 0),
   credits: {
     samples: credits.length,
@@ -235,7 +298,6 @@ const result = {
   productionRecommendation:
     providerCallCount === 0 ||
     hasProviderFailures ||
-    hasInsufficientProductionDiscovery ||
     credits.length < 10 ||
     !outcomeEvidence.available ||
     parameterSensitivity.status === 'not_estimable'

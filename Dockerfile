@@ -26,6 +26,7 @@ COPY --from=production-deps /app/dist ./dist
 COPY --from=production-deps /app/config ./config
 COPY --from=production-deps /app/scripts/replay-report.mjs ./scripts/replay-report.mjs
 COPY --from=production-deps /app/scripts/continuous-sampler.mjs ./scripts/continuous-sampler.mjs
+COPY --from=production-deps /app/scripts/sampling-scheduler.mjs ./scripts/sampling-scheduler.mjs
 COPY --from=production-deps /app/scripts/redact.mjs ./scripts/redact.mjs
 VOLUME ["/app/data"]
 CMD ["node", "dist/app/healthcheck.js"]

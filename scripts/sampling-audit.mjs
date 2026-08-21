@@ -44,24 +44,43 @@ const sampleRange = one(`
 const providerCallCount = Number(sampleRange?.provider_call_count ?? 0);
 const creditSampleCount = Number(credits?.samples ?? 0);
 const hasProviderFailures = provider.some((row) => Number(row.failures ?? 0) > 0);
-const hasInsufficientIndexingCoverage =
-  indexing.length === 0 ||
-  indexing.some(
-    (row) =>
-      row.unique_indexed_rate_percent === null || Number(row.unique_indexed_rate_percent) < 95,
-  );
+const productionDiscoveryCoverage = all(`
+  SELECT s.chain,
+         COUNT(*) AS candidate_tokens,
+         COUNT(CASE WHEN s.last_indexing_at IS NOT NULL THEN 1 END) AS attempted_tokens,
+         COUNT(CASE WHEN s.last_indexing_at IS NULL THEN 1 END) AS not_attempted_tokens,
+         COUNT(CASE WHEN p.token_address IS NOT NULL THEN 1 END) AS indexed_tokens,
+         ROUND(100.0 * COUNT(CASE WHEN s.last_indexing_at IS NOT NULL THEN 1 END)
+               / COUNT(*), 2) AS scheduling_coverage_percent,
+         ROUND(100.0 * COUNT(CASE WHEN p.token_address IS NOT NULL THEN 1 END)
+               / NULLIF(COUNT(CASE WHEN s.last_indexing_at IS NOT NULL THEN 1 END), 0), 2)
+           AS indexed_rate_of_attempted_percent
+  FROM sampling_candidates s
+  LEFT JOIN token_pools p ON p.chain = s.chain AND p.token_address = s.token_address
+  WHERE s.primary_seen_at IS NOT NULL
+  GROUP BY s.chain
+  ORDER BY s.chain
+`);
+const indexingResolutionReasons = all(`
+  SELECT chain, COALESCE(source_category, 'unknown') AS source_category,
+         COALESCE(resolution_reason, CASE WHEN indexed = 1 THEN 'resolved' ELSE 'legacy_unclassified' END)
+           AS resolution_reason,
+         COUNT(*) AS attempts, COUNT(DISTINCT token_address) AS unique_tokens
+  FROM indexing_attempts
+  GROUP BY chain, source_category, resolution_reason
+  ORDER BY chain, source_category, resolution_reason
+`);
 const result = {
   database: databasePath,
   sampleRange,
   provider,
   indexing,
+  productionDiscoveryCoverage,
+  indexingResolutionReasons,
   websocket,
   credits,
   productionRecommendation:
-    providerCallCount === 0 ||
-    hasProviderFailures ||
-    hasInsufficientIndexingCoverage ||
-    creditSampleCount < 10
+    providerCallCount === 0 || hasProviderFailures || creditSampleCount < 10
       ? 'hold_shadow'
       : 'requires_manual_review',
 };

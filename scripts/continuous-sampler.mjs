@@ -7,6 +7,12 @@ import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { redactSecrets } from './redact.mjs';
+import {
+  classifyIndexingResult,
+  discoveryCategory,
+  retryDelaySeconds,
+  selectIndexingCandidates,
+} from './sampling-scheduler.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const config = JSON.parse(
@@ -78,6 +84,23 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_candidates_token_time ON candidate_observations(chain, token_address, observed_at);
   CREATE INDEX IF NOT EXISTS idx_candidates_created ON candidate_observations(chain, created_at);
 
+  CREATE TABLE IF NOT EXISTS sampling_candidates (
+    chain TEXT NOT NULL,
+    token_address TEXT NOT NULL,
+    first_seen_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    created_at INTEGER,
+    primary_seen_at INTEGER,
+    auxiliary_seen_at INTEGER,
+    next_retry_at INTEGER,
+    retry_attempt INTEGER NOT NULL DEFAULT 0,
+    last_indexing_at INTEGER,
+    last_resolution_reason TEXT,
+    PRIMARY KEY (chain, token_address)
+  );
+  CREATE INDEX IF NOT EXISTS idx_sampling_candidates_schedule
+    ON sampling_candidates(chain, primary_seen_at, next_retry_at, first_seen_at);
+
   CREATE TABLE IF NOT EXISTS indexing_attempts (
     id INTEGER PRIMARY KEY,
     attempted_at INTEGER NOT NULL,
@@ -90,7 +113,9 @@ db.exec(`
     pool_created_at INTEGER,
     indexing_latency_seconds INTEGER,
     request_latency_ms INTEGER,
-    error TEXT
+    error TEXT,
+    source_category TEXT,
+    resolution_reason TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_indexing_token_time ON indexing_attempts(chain, token_address, attempted_at);
 
@@ -151,6 +176,15 @@ db.exec(`
   );
 `);
 
+function ensureColumn(table, column, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!columns.some((item) => item.name === column))
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+
+ensureColumn('indexing_attempts', 'source_category', 'TEXT');
+ensureColumn('indexing_attempts', 'resolution_reason', 'TEXT');
+
 const insertCall = db.prepare(`INSERT INTO provider_calls
   (observed_at, provider, capability, chain, ok, latency_ms, row_count, error)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
@@ -158,8 +192,36 @@ const insertCandidate = db.prepare(`INSERT INTO candidate_observations
   (observed_at, source, chain, interval, token_address, pool_hint, created_at, opened_at, rank, price, price_change, volume, liquidity, market_cap, swaps, buys, sells, holders, visiting, hot_level, safety_json, payload_hash)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 const insertIndexing = db.prepare(`INSERT INTO indexing_attempts
-  (attempted_at, chain, token_address, first_seen_at, created_at, indexed, pool_address, pool_created_at, indexing_latency_seconds, request_latency_ms, error)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+  (attempted_at, chain, token_address, first_seen_at, created_at, indexed, pool_address, pool_created_at, indexing_latency_seconds, request_latency_ms, error, source_category, resolution_reason)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+const upsertSamplingCandidate = db.prepare(`
+  INSERT INTO sampling_candidates
+    (chain, token_address, first_seen_at, last_seen_at, created_at, primary_seen_at, auxiliary_seen_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(chain, token_address) DO UPDATE SET
+    first_seen_at = MIN(sampling_candidates.first_seen_at, excluded.first_seen_at),
+    last_seen_at = MAX(sampling_candidates.last_seen_at, excluded.last_seen_at),
+    created_at = CASE
+      WHEN sampling_candidates.created_at IS NULL THEN excluded.created_at
+      WHEN excluded.created_at IS NULL THEN sampling_candidates.created_at
+      ELSE MIN(sampling_candidates.created_at, excluded.created_at)
+    END,
+    primary_seen_at = CASE
+      WHEN sampling_candidates.primary_seen_at IS NULL THEN excluded.primary_seen_at
+      WHEN excluded.primary_seen_at IS NULL THEN sampling_candidates.primary_seen_at
+      ELSE MIN(sampling_candidates.primary_seen_at, excluded.primary_seen_at)
+    END,
+    auxiliary_seen_at = CASE
+      WHEN sampling_candidates.auxiliary_seen_at IS NULL THEN excluded.auxiliary_seen_at
+      WHEN excluded.auxiliary_seen_at IS NULL THEN sampling_candidates.auxiliary_seen_at
+      ELSE MIN(sampling_candidates.auxiliary_seen_at, excluded.auxiliary_seen_at)
+    END
+`);
+const updateSamplingCandidate = db.prepare(`
+  UPDATE sampling_candidates
+  SET retry_attempt = ?, next_retry_at = ?, last_indexing_at = ?, last_resolution_reason = ?
+  WHERE chain = ? AND token_address = ?
+`);
 const upsertPool = db.prepare(`INSERT INTO token_pools
   (chain, token_address, pool_address, first_indexed_at, pool_created_at, last_seen_at)
   VALUES (?, ?, ?, ?, ?, ?)
@@ -174,6 +236,87 @@ const insertCredit = db.prepare(`INSERT INTO credit_samples
   (observed_at, plan, rpm, monthly_credit, used_credit, remaining_credit)
   VALUES (?, ?, ?, ?, ?, ?)`);
 
+function syncSamplingCandidateRegistry() {
+  db.exec(`
+    INSERT INTO sampling_candidates
+      (chain, token_address, first_seen_at, last_seen_at, created_at, primary_seen_at, auxiliary_seen_at)
+    SELECT chain,
+           token_address,
+           MIN(observed_at),
+           MAX(observed_at),
+           MIN(created_at),
+           MIN(CASE WHEN source IN ('trending', 'hot-searches') THEN observed_at END),
+           MIN(CASE WHEN source NOT IN ('trending', 'hot-searches') THEN observed_at END)
+    FROM candidate_observations
+    GROUP BY chain, token_address
+    ON CONFLICT(chain, token_address) DO UPDATE SET
+      first_seen_at = MIN(sampling_candidates.first_seen_at, excluded.first_seen_at),
+      last_seen_at = MAX(sampling_candidates.last_seen_at, excluded.last_seen_at),
+      created_at = CASE
+        WHEN sampling_candidates.created_at IS NULL THEN excluded.created_at
+        WHEN excluded.created_at IS NULL THEN sampling_candidates.created_at
+        ELSE MIN(sampling_candidates.created_at, excluded.created_at)
+      END,
+      primary_seen_at = CASE
+        WHEN sampling_candidates.primary_seen_at IS NULL THEN excluded.primary_seen_at
+        WHEN excluded.primary_seen_at IS NULL THEN sampling_candidates.primary_seen_at
+        ELSE MIN(sampling_candidates.primary_seen_at, excluded.primary_seen_at)
+      END,
+      auxiliary_seen_at = CASE
+        WHEN sampling_candidates.auxiliary_seen_at IS NULL THEN excluded.auxiliary_seen_at
+        WHEN excluded.auxiliary_seen_at IS NULL THEN sampling_candidates.auxiliary_seen_at
+        ELSE MIN(sampling_candidates.auxiliary_seen_at, excluded.auxiliary_seen_at)
+      END
+  `);
+
+  const legacyRows = db
+    .prepare(
+      `
+      SELECT s.chain, s.token_address, s.retry_attempt, s.next_retry_at,
+             COUNT(i.id) AS attempts, MAX(i.attempted_at) AS last_attempted_at,
+             (SELECT i2.resolution_reason
+              FROM indexing_attempts i2
+              WHERE i2.chain = s.chain AND i2.token_address = s.token_address
+              ORDER BY i2.attempted_at DESC, i2.id DESC LIMIT 1) AS last_resolution_reason,
+             p.token_address AS resolved_token
+      FROM sampling_candidates s
+      LEFT JOIN token_pools p
+        ON p.chain = s.chain AND p.token_address = s.token_address
+      LEFT JOIN indexing_attempts i
+        ON i.chain = s.chain AND i.token_address = s.token_address
+      GROUP BY s.chain, s.token_address
+    `,
+    )
+    .all();
+  for (const row of legacyRows) {
+    if (row.last_attempted_at === null) continue;
+    const attempts = Number(row.attempts ?? 0);
+    const resolved = row.resolved_token !== null;
+    const retryAttempt = resolved ? 0 : Math.max(attempts, Number(row.retry_attempt ?? 0));
+    const nextRetryAt = resolved
+      ? null
+      : row.next_retry_at !== null
+        ? row.next_retry_at
+        : Number(row.last_attempted_at) +
+          retryDelaySeconds(
+            retryAttempt,
+            config.coingecko.index_retry_initial_seconds,
+            config.coingecko.index_retry_max_seconds,
+          ) *
+            1000;
+    updateSamplingCandidate.run(
+      retryAttempt,
+      nextRetryAt,
+      row.last_attempted_at,
+      row.last_resolution_reason || (resolved ? 'resolved' : null),
+      row.chain,
+      row.token_address,
+    );
+  }
+}
+
+syncSamplingCandidateRegistry();
+
 function hash(value) {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
@@ -184,6 +327,12 @@ function asText(value) {
 
 function addressKey(chain, address) {
   return chain === 'bsc' && typeof address === 'string' ? address.toLowerCase() : address;
+}
+
+function isValidPoolIdentity(chain, address) {
+  if (typeof address !== 'string' || address.length === 0) return false;
+  if (chain === 'bsc') return /^0x[0-9a-f]{40}$/iu.test(address);
+  return /^[1-9A-HJ-NP-Za-km-z]{32,50}$/u.test(address);
 }
 
 function safeError(value, limit = 500) {
@@ -298,7 +447,7 @@ async function cg(pathname) {
 }
 
 function normalizeCandidate(token, source, chain, interval, observedAt, rank = null) {
-  const address = token.address || token.token_address;
+  const address = addressKey(chain, token.address || token.token_address);
   if (!address) return;
   const safety =
     chain === 'sol'
@@ -329,7 +478,7 @@ function normalizeCandidate(token, source, chain, interval, observedAt, rank = n
     chain,
     interval,
     address,
-    pool: token.pool_address,
+    pool: addressKey(chain, token.pool_address),
     created: token.creation_timestamp ?? token.created_timestamp,
     opened: token.open_timestamp,
     rank,
@@ -369,6 +518,16 @@ function normalizeCandidate(token, source, chain, interval, observedAt, rank = n
     selected.hot_level ?? null,
     JSON.stringify(safety),
     hash(selected),
+  );
+  const category = discoveryCategory(source);
+  upsertSamplingCandidate.run(
+    chain,
+    address,
+    observedAt,
+    observedAt,
+    selected.created || null,
+    category === 'primary' ? observedAt : null,
+    category === 'auxiliary' ? observedAt : null,
   );
 }
 
@@ -441,34 +600,28 @@ async function collectDiscovery(tick) {
 function recentCandidates(chain) {
   const cutoff = Date.now() - config.coingecko.pending_ttl_minutes * 60_000;
   const now = Date.now();
-  const candidates = db
+  const rows = db
     .prepare(
       `
-    SELECT c.token_address, MIN(c.observed_at) AS first_seen_at, MIN(c.created_at) AS created_at,
-           (SELECT COUNT(*) FROM indexing_attempts i
-            WHERE i.chain=c.chain AND i.token_address=c.token_address) AS indexing_attempts,
-           (SELECT MAX(i.attempted_at) FROM indexing_attempts i
-            WHERE i.chain=c.chain AND i.token_address=c.token_address) AS last_indexing_at
-    FROM candidate_observations c
-    LEFT JOIN token_pools p ON p.chain=c.chain AND p.token_address=c.token_address
-    WHERE c.chain=? AND c.observed_at>=? AND p.token_address IS NULL
-    GROUP BY c.token_address
-    ORDER BY first_seen_at DESC
-    LIMIT ?
+    SELECT s.chain, s.token_address, s.first_seen_at, s.created_at,
+           s.next_retry_at, s.retry_attempt, s.last_indexing_at,
+           CASE WHEN s.primary_seen_at IS NOT NULL THEN 'primary' ELSE 'auxiliary' END
+             AS source_category,
+           CASE WHEN p.token_address IS NOT NULL THEN 1 ELSE 0 END AS resolved
+    FROM sampling_candidates s
+    LEFT JOIN token_pools p ON p.chain=s.chain AND p.token_address=s.token_address
+    WHERE s.chain=? AND s.first_seen_at>=? AND p.token_address IS NULL
+      AND (s.next_retry_at IS NULL OR s.next_retry_at<=?)
+    ORDER BY CASE WHEN s.primary_seen_at IS NOT NULL THEN 0 ELSE 1 END,
+             COALESCE(s.next_retry_at, 0), s.first_seen_at, s.token_address
   `,
     )
-    .all(chain, cutoff, config.coingecko.max_tokens_per_chain * 20);
-  return candidates
-    .filter((candidate) => {
-      if (candidate.last_indexing_at === null) return true;
-      const attempt = Number(candidate.indexing_attempts ?? 0);
-      const delaySeconds = Math.min(
-        config.coingecko.index_retry_max_seconds,
-        config.coingecko.index_retry_initial_seconds * 2 ** Math.min(Math.max(attempt - 1, 0), 30),
-      );
-      return now >= Number(candidate.last_indexing_at) + delaySeconds * 1000;
-    })
-    .slice(0, config.coingecko.max_tokens_per_chain);
+    .all(chain, cutoff, now);
+  return selectIndexingCandidates(rows, {
+    now,
+    cutoff,
+    limit: config.coingecko.max_tokens_per_chain,
+  });
 }
 
 async function collectIndexing() {
@@ -495,18 +648,41 @@ async function collectIndexing() {
     );
     for (const candidate of candidates) {
       const token = tokenMap.get(addressKey(chain, candidate.token_address));
-      const poolId = token?.relationships?.top_pools?.data?.[0]?.id;
+      const relationships = token?.relationships;
+      const topPoolRows = relationships?.top_pools?.data;
+      const poolId = topPoolRows?.[0]?.id;
       const pool = includedMap.get(poolId);
-      const poolAddress =
-        pool?.attributes?.address || (poolId ? poolId.replace(`${network}_`, '') : null);
+      const rawPoolAddress = pool?.attributes?.address || null;
+      const poolAddress = isValidPoolIdentity(chain, rawPoolAddress)
+        ? addressKey(chain, rawPoolAddress)
+        : null;
       const poolCreatedAt = pool?.attributes?.pool_created_at
         ? Date.parse(pool.attributes.pool_created_at)
         : null;
-      const indexed = Boolean(poolAddress);
+      const resolutionReason = error
+        ? 'provider_error'
+        : classifyIndexingResult({
+            token,
+            relationships,
+            topPoolRows,
+            pool,
+            poolAddress,
+          });
+      const indexed = resolutionReason === 'resolved';
       const baseTime = candidate.created_at ? candidate.created_at * 1000 : candidate.first_seen_at;
       const indexingLatency = indexed
         ? Math.max(0, Math.round((attemptedAt - baseTime) / 1000))
         : null;
+      const retryAttempt = Number(candidate.retry_attempt ?? 0) + 1;
+      const nextRetryAt = indexed
+        ? null
+        : attemptedAt +
+          retryDelaySeconds(
+            retryAttempt,
+            config.coingecko.index_retry_initial_seconds,
+            config.coingecko.index_retry_max_seconds,
+          ) *
+            1000;
       insertIndexing.run(
         attemptedAt,
         chain,
@@ -519,6 +695,16 @@ async function collectIndexing() {
         indexingLatency,
         latency,
         error ? safeError(error.message) : null,
+        candidate.source_category,
+        resolutionReason,
+      );
+      updateSamplingCandidate.run(
+        indexed ? 0 : retryAttempt,
+        nextRetryAt,
+        attemptedAt,
+        resolutionReason,
+        chain,
+        candidate.token_address,
       );
       if (indexed)
         upsertPool.run(
@@ -766,6 +952,7 @@ while (!stopping) {
   const counts = Object.fromEntries(
     [
       ['candidate_observations', 'candidate_observations'],
+      ['sampling_candidates', 'sampling_candidates'],
       ['indexing_attempts', 'indexing_attempts'],
       ['token_pools', 'token_pools'],
       ['pool_snapshots', 'pool_snapshots'],

@@ -18,7 +18,7 @@
 - CoinGecko 深测：本次重跑 34/34 通过，覆盖 50 池批量、50 token 批量、REST trades、30 秒 base/quote OHLCV、G2/G3 WebSocket、SOL/BSC 和 credits 计数；REST credit delta=29。合同脚本按池列表 m5 活跃度选取 WebSocket 测试池，避免把无事件的列表首池误判为协议失败。
 - Telegram 只读预检：GMGN/CoinGecko 通过；Telegram `getMe` 因到 Telegram IP 的 `ETIMEDOUT/EHOSTUNREACH` 失败，未发送消息；此前成功记录仍显示 admin private/group 通过、配置 channel 为 `chat not found`。
 - Docker smoke：当前提交镜像 `999-app:acceptance` 重建成功，容器 healthcheck 输出 healthy，SQLite schemaVersion=2；宿主机 healthcheck 因磁盘高水位而诚实失败；dirty deploy guard 在未提交工作树下于 `git pull` 前以 exit=1 拒绝。Compose 仍包含长期 app、Telegram outbox worker 与带健康检查的原始 Shadow sampler；本次结果证明容器可构建和健康检查通过，但不等同于真实 provider 长期运行或服务器部署。
-- 服务器检查：SSH `lumi-server` 可达，主机为 `dwhkmZxyd8sskPaG`；已发现的 `/www/wwwroot/818`、`/www/wwwroot/dianzigou`、`/www/wwwroot/dianzigoubot` 虽有 Git/Compose，但最近提交分别为其他项目内容，未发现本项目标识，未执行任何远端写入；本地仓库也未配置 `origin`，因此无法伪造 `git pull`/服务器部署放行。
+- 服务器检查：SSH `lumi-server` 可达，主机为 `dwhkmZxyd8sskPaG`；本地 `main` 已推送到 `https://github.com/bitwaters/999.git`，服务器 `/www/wwwroot/999` 通过 Git 克隆到同一提交，Compose 配置校验和 Docker 构建均通过，临时凭据的容器 healthcheck 输出 healthy、schemaVersion=2。服务器尚未配置真实 `.env`，未启动真实 provider/Telegram/Shadow 长期采样，也未使用占位凭据启动服务。
 - 累计采样只读审计：145 provider calls、GMGN 84 calls/16 failures（429/temporary ban）、CoinGecko REST 45/0 failures、BSC indexing 40/460（8.7%）、SOL indexing 306/310、WebSocket 353 events、credits 仅 4 个采样点；最近 5 分钟切片 GMGN 35/0 失败但 BSC indexing 仅 7/300（2.33%）；Outcome 标签缺失、参数敏感性不可估计，S1 全部保持关闭；审计结论为 `hold_shadow`，不支持 production。
 
 ## 外部验收保留项

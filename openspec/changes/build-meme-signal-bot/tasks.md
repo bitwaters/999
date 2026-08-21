@@ -74,13 +74,13 @@
 
 ## 9. 确定性 Replay
 
-- [ ] 9.1 实现 clean worktree 校验、当前 bot.yaml 输入和“保存版本 + 显式 --set”完整候选快照，禁止第二配置文件。
-- [ ] 9.2 实现 replay_run 生命周期、config/Git/run mode 一致性校验、数据范围/cutoff/完整性和可恢复失败状态。
-- [ ] 9.3 从 raw discovery 按模拟 decision_time 重建 Candidate Cycle、年龄、TTL 与冷却，不复用 live candidate_id。
-- [ ] 9.4 从 raw safety、pool/Level 1、G2、OHLCV 使用当前 parser/config 直接重建主池和全部 replay 证据，不复用或写入 live 派生表。
-- [ ] 9.5 实现严格 observed-at 时间线、simulated confirmation/delivery、dispatch guard、entry、Outcome 和 full/partial/unavailable。
-- [ ] 9.6 实现 SQLite online backup page batch、一致临时副本、磁盘预检、run-id 清理、live backlog 让步和小批结果写回。
-- [ ] 9.7 测试 TTL/参数/parser 改变、无历史 G2、cutoff 未覆盖 horizon、无前视、actual/simulated 隔离和 replay 不生成 Outbox。
+- [x] 9.1 实现 clean worktree 校验、当前 bot.yaml 输入和“保存版本 + 显式 --set”完整候选快照，禁止第二配置文件。
+- [x] 9.2 实现 replay_run 生命周期、config/Git/run mode 一致性校验、数据范围/cutoff/完整性和可恢复失败状态。
+- [x] 9.3 从 raw discovery 按模拟 decision_time 重建 Candidate Cycle、年龄、TTL 与冷却，不复用 live candidate_id。
+- [x] 9.4 从 raw safety、pool/Level 1、G2、OHLCV 使用当前 parser/config 直接重建主池和全部 replay 证据，不复用或写入 live 派生表。
+- [x] 9.5 实现严格 observed-at 时间线、simulated confirmation/delivery、dispatch guard、entry、Outcome 和 full/partial/unavailable。
+- [x] 9.6 实现 SQLite online backup page batch、一致临时副本、磁盘预检、run-id 清理、live backlog 让步和小批结果写回。
+- [x] 9.7 测试 TTL/参数/parser 改变、无历史 G2、cutoff 未覆盖 horizon、无前视、actual/simulated 隔离和 replay 不生成 Outbox。
 
 ## 10. 健康、备份与部署
 

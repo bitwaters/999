@@ -2,7 +2,6 @@ import { Decimal } from 'decimal.js';
 import type { BotConfig } from '../config/schema.js';
 import { canReuseSafetyPass, type SafetyResult } from '../domain/safety.js';
 import { parseDecimalString } from '../providers/parsing.js';
-import type { DataState } from '../providers/types.js';
 import type { G2Window } from '../market-data/g2.js';
 import { isLevel1Fresh, type Level1Snapshot } from '../market-data/level1.js';
 
@@ -163,10 +162,16 @@ export type SignalSolidificationInput = {
   candidateFresh: boolean;
   poolStable: boolean;
   level1Fresh: boolean;
-  g2State: Extract<
-    DataState,
-    'complete' | 'partial' | 'zero' | 'missing' | 'stale' | 'invalid' | 'conflict' | 'unresolved'
-  >;
+  g2State:
+    | 'complete'
+    | 'partial'
+    | 'zero'
+    | 'missing'
+    | 'stale'
+    | 'invalid'
+    | 'conflict'
+    | 'unresolved'
+    | 'incomplete';
   evidenceComplete: boolean;
   attention: RuleDecision;
   conviction: RuleDecision;
@@ -182,6 +187,8 @@ export function solidifyEmergingSignal(
   if (input.anchorCooldownUntil !== undefined && input.anchorCooldownUntil > input.confirmedAt)
     reasons.push('cooldown:anchor');
   if (input.safety.status !== 'pass') reasons.push(`safety:${input.safety.status}`);
+  else if (!canReuseSafetyPass(input.safety, input.confirmedAt, input.configVersionId))
+    reasons.push('safety:not_fresh_or_config_mismatch');
   if (!input.candidateFresh) reasons.push('candidate:stale');
   if (!input.poolStable) reasons.push('pool:unstable');
   if (!input.level1Fresh) reasons.push('level1:stale');

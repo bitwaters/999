@@ -43,6 +43,8 @@ providers:
   telegram:
     bot_token_env: TELEGRAM_BOT_TOKEN
     request_timeout_ms: 10000
+    max_response_bytes: 262144
+    max_decompressed_bytes: 1048576
 chains:
   sol:
     discovery:

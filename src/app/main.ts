@@ -2,9 +2,10 @@ import { ensureConfigVersion } from '../persistence/config-versions.js';
 import { openDatabase } from '../persistence/db.js';
 import { requireSecretEnv, loadConfig } from '../config/load.js';
 import { BotRuntime } from './runtime.js';
+import { ProviderProbe } from './provider-probe.js';
 
 const loaded = await loadConfig();
-requireSecretEnv(loaded.config);
+const secrets = requireSecretEnv(loaded.config);
 const database = openDatabase(loaded.config.storage.database_path, {
   busyTimeoutMs: loaded.config.storage.busy_timeout_ms,
 });
@@ -22,10 +23,22 @@ const configVersion = ensureConfigVersion(
     maxMs: loaded.config.runtime.sqlite.transaction_max_ms,
   },
 );
+const providerProbe = new ProviderProbe({
+  config: loaded.config,
+  secrets,
+  database,
+  writeBudget: {
+    maxRows: loaded.config.runtime.sqlite.transaction_max_rows,
+    maxMs: loaded.config.runtime.sqlite.transaction_max_ms,
+  },
+  logger: (level, event, fields) =>
+    console.error(JSON.stringify({ level, event, ...fields, at: Date.now() })),
+});
 const runtime = new BotRuntime({
   loaded,
   database,
   configVersionId: configVersion.id,
+  providerProbe,
 });
 
 const stop = async (signal: string) => {

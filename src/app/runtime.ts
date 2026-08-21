@@ -10,6 +10,7 @@ import {
 import { EventLoopLagMonitor } from '../persistence/event-loop-lag.js';
 import type { SqliteDatabase } from '../persistence/db.js';
 import type { LoadedConfig } from '../config/load.js';
+import type { ProviderProbe } from './provider-probe.js';
 import { renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
@@ -17,6 +18,7 @@ export type RuntimeOptions = {
   loaded: LoadedConfig;
   database: SqliteDatabase;
   configVersionId: number;
+  providerProbe: ProviderProbe;
   logger?: ReturnType<typeof createStructuredLogger>;
 };
 
@@ -41,11 +43,13 @@ export class BotRuntime {
       this.config.runtime.event_loop_lag.sample_interval_ms,
       this.config.runtime.event_loop_lag.incomplete_threshold_ms,
     );
+    this.options.providerProbe.onStatusChange(() => this.emitHeartbeat());
   }
 
   public start(): void {
     if (this.heartbeatTimer) return;
     this.lagMonitor.start();
+    this.options.providerProbe.start();
     const heartbeatMs = this.config.chains.sol.discovery.poll_interval_seconds * 1000;
     this.heartbeatTimer = setInterval(() => this.emitHeartbeat(), heartbeatMs);
     this.backupTimer = setInterval(
@@ -68,12 +72,14 @@ export class BotRuntime {
     this.heartbeatTimer = undefined;
     this.backupTimer = undefined;
     this.lagMonitor.stop();
+    await this.options.providerProbe.stop();
     await this.backupInFlight;
     this.logger('info', 'runtime_stopped', { config_version_id: this.options.configVersionId });
   }
 
   public healthSnapshot(): HealthSnapshot {
     const lag = this.lagMonitor.snapshot();
+    const providerStatus = this.options.providerProbe.status();
     const disk = readDiskHealth(
       path.dirname(path.resolve(this.config.storage.database_path)),
       this.config.storage.disk_high_water_percent,
@@ -84,11 +90,11 @@ export class BotRuntime {
       schemaVersion: Number(this.options.database.pragma('user_version', { simple: true })),
       clockOffsetMs: 0,
       components: {
-        provider: 'unknown',
+        provider: providerStatus.provider,
         safety: 'unknown',
         level1: 'unknown',
         g2: 'unknown',
-        telegram: 'unknown',
+        telegram: providerStatus.telegram,
         sqlite: 'ok',
         event_loop: lag.incomplete ? 'degraded' : 'ok',
       },
@@ -100,6 +106,7 @@ export class BotRuntime {
   private emitHeartbeat(): void {
     try {
       const snapshot = this.healthSnapshot();
+      const providerStatus = this.options.providerProbe.status();
       this.writeHealthSnapshot(snapshot);
       this.logger(snapshot.status === 'healthy' ? 'info' : 'warn', 'runtime_health', {
         status: snapshot.status,
@@ -108,6 +115,7 @@ export class BotRuntime {
         components: snapshot.components,
         disk: snapshot.disk,
         degradation: conservativeDegradation(snapshot),
+        provider_probe: providerStatus,
       });
     } catch (error) {
       this.logger('error', 'runtime_health_failed', {

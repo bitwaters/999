@@ -64,7 +64,8 @@ async function readBody(response: Response, maxBytes: number): Promise<Uint8Arra
 
 function decodeBody(body: Uint8Array, response: Response, maxBytes: number): string {
   const encoded = response.headers.get('content-encoding');
-  const decoded = encoded?.includes('gzip') ? gunzipSync(body) : body;
+  const hasGzipMagic = body.length >= 2 && body[0] === 0x1f && body[1] === 0x8b;
+  const decoded = encoded?.includes('gzip') && hasGzipMagic ? gunzipSync(body) : body;
   if (decoded.byteLength > maxBytes)
     throw new ProviderResponseTooLargeError(`Decoded response exceeded ${maxBytes} bytes`);
   return Buffer.from(decoded).toString('utf8');

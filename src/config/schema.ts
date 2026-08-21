@@ -166,7 +166,12 @@ const providerSchema = z
       })
       .strict(),
     telegram: z
-      .object({ bot_token_env: z.string().min(1), request_timeout_ms: z.number().int().positive() })
+      .object({
+        bot_token_env: z.string().min(1),
+        request_timeout_ms: z.number().int().positive(),
+        max_response_bytes: z.number().int().positive(),
+        max_decompressed_bytes: z.number().int().positive(),
+      })
       .strict(),
   })
   .strict();

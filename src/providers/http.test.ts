@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { gzipSync } from 'node:zlib';
 import { ProviderResponseTooLargeError, requestJson } from './http.js';
 
 const options = {
@@ -69,4 +70,36 @@ test('does not retry a caller cancellation', async () => {
   controller.abort();
   await assert.rejects(promise, /Abort/u);
   assert.equal(calls, 1);
+});
+
+test('does not double-decompress a fetch body already decoded by undici', async () => {
+  const result = await requestJson<{ ok: boolean }>(
+    'https://example.test',
+    {},
+    {
+      ...options,
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { 'content-encoding': 'gzip' },
+        }),
+    },
+  );
+  assert.equal(result.data.ok, true);
+});
+
+test('decompresses a genuine gzip body marked by the provider', async () => {
+  const result = await requestJson<{ ok: boolean }>(
+    'https://example.test',
+    {},
+    {
+      ...options,
+      fetchImpl: async () =>
+        new Response(gzipSync(JSON.stringify({ ok: true })), {
+          status: 200,
+          headers: { 'content-encoding': 'gzip' },
+        }),
+    },
+  );
+  assert.equal(result.data.ok, true);
 });

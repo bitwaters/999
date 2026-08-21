@@ -3,6 +3,7 @@ import { openDatabase } from '../persistence/db.js';
 import { requireSecretEnv, loadConfig } from '../config/load.js';
 import { BotRuntime } from './runtime.js';
 import { ProviderProbe } from './provider-probe.js';
+import { TelegramDeliveryWorker } from '../delivery/worker.js';
 
 const loaded = await loadConfig();
 const secrets = requireSecretEnv(loaded.config);
@@ -35,11 +36,23 @@ const providerProbe = new ProviderProbe({
   logger: (level, event, fields) =>
     console.error(JSON.stringify({ level, event, ...fields, at: Date.now() })),
 });
+const deliveryWorker = new TelegramDeliveryWorker({
+  config: loaded.config,
+  botToken: secrets[loaded.config.providers.telegram.bot_token_env]!,
+  database,
+  writeBudget: {
+    maxRows: loaded.config.runtime.sqlite.transaction_max_rows,
+    maxMs: loaded.config.runtime.sqlite.transaction_max_ms,
+  },
+  logger: (level, event, fields) =>
+    console.error(JSON.stringify({ level, event, ...fields, at: Date.now() })),
+});
 const runtime = new BotRuntime({
   loaded,
   database,
   configVersionId: configVersion.id,
   providerProbe,
+  deliveryWorker,
 });
 
 const stop = async (signal: string) => {

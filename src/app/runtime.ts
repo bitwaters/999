@@ -11,6 +11,7 @@ import { EventLoopLagMonitor } from '../persistence/event-loop-lag.js';
 import type { SqliteDatabase } from '../persistence/db.js';
 import type { LoadedConfig } from '../config/load.js';
 import type { ProviderProbe } from './provider-probe.js';
+import type { TelegramDeliveryWorker } from '../delivery/worker.js';
 import { renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
@@ -19,6 +20,7 @@ export type RuntimeOptions = {
   database: SqliteDatabase;
   configVersionId: number;
   providerProbe: ProviderProbe;
+  deliveryWorker?: TelegramDeliveryWorker;
   logger?: ReturnType<typeof createStructuredLogger>;
 };
 
@@ -49,6 +51,7 @@ export class BotRuntime {
   public start(): void {
     if (this.heartbeatTimer) return;
     this.lagMonitor.start();
+    this.options.deliveryWorker?.start();
     this.options.providerProbe.start();
     const heartbeatMs = this.config.chains.sol.discovery.poll_interval_seconds * 1000;
     this.heartbeatTimer = setInterval(() => this.emitHeartbeat(), heartbeatMs);
@@ -72,6 +75,7 @@ export class BotRuntime {
     this.heartbeatTimer = undefined;
     this.backupTimer = undefined;
     this.lagMonitor.stop();
+    await this.options.deliveryWorker?.stop();
     await this.options.providerProbe.stop();
     await this.backupInFlight;
     this.logger('info', 'runtime_stopped', { config_version_id: this.options.configVersionId });

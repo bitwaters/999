@@ -20,7 +20,8 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      # The first provider probe can refresh up to 100 pools at the configured REST rate.
+      start_period: 180s
     read_only: true
     tmpfs:
       - /tmp

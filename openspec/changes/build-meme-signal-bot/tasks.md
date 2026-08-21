@@ -54,13 +54,13 @@
 
 ## 7. Telegram 与事务 Outbox
 
-- [ ] 7.1 实现 ENTRY/REPORT/SYSTEM renderer，并分别限制管理员、频道、群组可见字段与能力。
-- [ ] 7.2 实现 Signal 与全部启用且未被非锚点冷却抑制的 ENTRY rows 原子事务，以及三类 dedupe_key 和唯一约束。
-- [ ] 7.3 实现 Outbox 状态机、指数退避、ENTRY 固定 expires_at、REPORT/SYSTEM 最大年龄/次数和已渲染 payload 重启恢复。
-- [ ] 7.4 实现发送前 dispatch guard、sending/attempt_started_at/sent_at/message_id 和遗留 sending 的 delivery_uncertain 恢复。
-- [ ] 7.5 实现唯一 Outcome 锚点生命周期：非锚点不得启动 entry/退订，锚点过期停止补发，锚点 uncertain 退出主 cohort。
-- [ ] 7.6 实现管理员私聊 allowlist 与只读 `/status`、`/health`、`/credits`、`/report`，群组/频道命令必须拒绝。
-- [ ] 7.7 使用 Telegram fake server 覆盖成功、429、超时、成功后崩溃、重复事件、非锚点先送达和锚点过期。
+- [x] 7.1 实现 ENTRY/REPORT/SYSTEM renderer，并分别限制管理员、频道、群组可见字段与能力。
+- [x] 7.2 实现 Signal 与全部启用且未被非锚点冷却抑制的 ENTRY rows 原子事务，以及三类 dedupe_key 和唯一约束。
+- [x] 7.3 实现 Outbox 状态机、指数退避、ENTRY 固定 expires_at、REPORT/SYSTEM 最大年龄/次数和已渲染 payload 重启恢复。
+- [x] 7.4 实现发送前 dispatch guard、sending/attempt_started_at/sent_at/message_id 和遗留 sending 的 delivery_uncertain 恢复。
+- [x] 7.5 实现唯一 Outcome 锚点生命周期：非锚点不得启动 entry/退订，锚点过期停止补发，锚点 uncertain 退出主 cohort。
+- [x] 7.6 实现管理员私聊 allowlist 与只读 `/status`、`/health`、`/credits`、`/report`，群组/频道命令必须拒绝。
+- [x] 7.7 使用 Telegram fake server 覆盖成功、429、超时、成功后崩溃、重复事件、非锚点先送达和锚点过期。
 
 ## 8. Outcome 与报告
 

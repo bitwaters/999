@@ -1273,7 +1273,14 @@ export class ProviderProbe {
       )
       .get(trade.chain, trade.tokenAddress, trade.poolAddress) as
       { id: number; cycle_started_at: number; safety_json: string | null } | undefined;
-    if (!candidate?.safety_json) return;
+    if (!candidate) {
+      this.logSignalBlocked(trade, ['candidate:not_armed']);
+      return;
+    }
+    if (!candidate.safety_json) {
+      this.logSignalBlocked(trade, ['candidate:missing_safety']);
+      return;
+    }
     const cycle = this.trackers[trade.chain].get(trade.chain, trade.tokenAddress);
     const pool = [...this.level1Pools.values()].find(
       (item) =>
@@ -1281,9 +1288,19 @@ export class ProviderProbe {
         item.tokenAddress === trade.tokenAddress &&
         item.poolAddress === trade.poolAddress,
     );
-    if (!cycle || !pool) return;
+    if (!cycle) {
+      this.logSignalBlocked(trade, ['cycle:missing']);
+      return;
+    }
+    if (!pool) {
+      this.logSignalBlocked(trade, ['pool:missing']);
+      return;
+    }
     const level1 = this.level1Snapshots.get(pool.identityKey);
-    if (!level1) return;
+    if (!level1) {
+      this.logSignalBlocked(trade, ['level1:missing']);
+      return;
+    }
     const now = Date.now();
     const windowEnd = Math.floor(now / 30_000) * 30_000;
     if (trade.eventAt >= windowEnd) {
@@ -1298,7 +1315,10 @@ export class ProviderProbe {
       windowEnd,
     );
     const safety = parseSafety(candidate.safety_json);
-    if (!safety) return;
+    if (!safety) {
+      this.logSignalBlocked(trade, ['safety:invalid']);
+      return;
+    }
     const anchorCooldownUntil = this.findAnchorCooldown(trade.chain, trade.tokenAddress, now);
     let result;
     try {

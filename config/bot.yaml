@@ -51,6 +51,8 @@ chains:
       poll_interval_seconds: 60
       candidate_ttl_seconds: 900
       max_candidates: 200
+      unresolved_retry_initial_seconds: 30
+      unresolved_retry_max_seconds: 300
     safety:
       freshness_seconds: 60
       s0:
@@ -62,6 +64,10 @@ chains:
         dev_team_hold_rate: { enabled: false, verified: false, max: 0.1 }
         bundler_rate: { enabled: false, verified: false, max: 0.2 }
         rug_ratio: { enabled: false, verified: false, max: 0.2 }
+    level1:
+      merge_delay_ms: 300
+      refresh_interval_seconds: 45
+      buyers_freshness_seconds: 45
     newborn:
       max_age_seconds: 120
       min_g2_observation_seconds: 30
@@ -77,6 +83,8 @@ chains:
       poll_interval_seconds: 60
       candidate_ttl_seconds: 900
       max_candidates: 200
+      unresolved_retry_initial_seconds: 30
+      unresolved_retry_max_seconds: 300
     safety:
       freshness_seconds: 60
       s0:
@@ -90,6 +98,10 @@ chains:
         top_10_holder_rate: { enabled: false, verified: false, max: 0.25 }
         dev_team_hold_rate: { enabled: false, verified: false, max: 0.1 }
         rug_ratio: { enabled: false, verified: false, max: 0.2 }
+    level1:
+      merge_delay_ms: 300
+      refresh_interval_seconds: 45
+      buyers_freshness_seconds: 45
     newborn:
       max_age_seconds: 120
       min_g2_observation_seconds: 30

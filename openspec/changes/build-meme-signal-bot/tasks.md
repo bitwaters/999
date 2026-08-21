@@ -35,12 +35,12 @@
 
 ## 5. Candidate、主池与 Level 1
 
-- [ ] 5.1 实现 Trending 1m/5m 和 Hot Searches discovery observed event、允许触发条件、Candidate Cycle TTL 与重复来源合并。
-- [ ] 5.2 实现 safety 后 GMGN 廉价预筛和 CoinGecko unresolved 退避，不允许未索引候选进入批量刷新或 G2。
-- [ ] 5.3 实现 Newborn/Early/Established、decision_time、coverage/rate 和最小样本规则，验证只有 1m 的 Newborn 可继续评估。
-- [ ] 5.4 实现 CoinGecko 主池解析、base/quote/target side 验证和确定排序；切池必须关闭旧 Cycle。
-- [ ] 5.5 实现按链 50 池上限的事件合批与周期刷新，保存 buyers、sellers、buys/sells、volume、net buy、reserve、pool age 和 freshness。
-- [ ] 5.6 实现 Armed 进入/退出、confirmed-pending-anchor 持续 Level 1 刷新和锚点冷却前置检查。
+- [x] 5.1 实现 Trending 1m/5m 和 Hot Searches discovery observed event、允许触发条件、Candidate Cycle TTL 与重复来源合并。
+- [x] 5.2 实现 safety 后 GMGN 廉价预筛和 CoinGecko unresolved 退避，不允许未索引候选进入批量刷新或 G2。
+- [x] 5.3 实现 Newborn/Early/Established、decision_time、coverage/rate 和最小样本规则，验证只有 1m 的 Newborn 可继续评估。
+- [x] 5.4 实现 CoinGecko 主池解析、base/quote/target side 验证和确定排序；切池必须关闭旧 Cycle。
+- [x] 5.5 实现按链 50 池上限的事件合批与周期刷新，保存 buyers、sellers、buys/sells、volume、net buy、reserve、pool age 和 freshness。
+- [x] 5.6 实现 Armed 进入/退出、confirmed-pending-anchor 持续 Level 1 刷新和锚点冷却前置检查。
 
 ## 6. G2、ACE 与唯一信号
 

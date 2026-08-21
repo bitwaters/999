@@ -15,6 +15,8 @@ const discoverySchema = z
     poll_interval_seconds: z.number().int().positive(),
     candidate_ttl_seconds: z.number().int().positive(),
     max_candidates: z.number().int().positive(),
+    unresolved_retry_initial_seconds: z.number().int().positive(),
+    unresolved_retry_max_seconds: z.number().int().positive(),
   })
   .strict();
 
@@ -37,6 +39,14 @@ const establishedSchema = z
   .object({
     min_age_seconds: z.number().int().positive(),
     required_windows: z.array(z.enum(['m5', 'm15', 'm30'])).min(1),
+  })
+  .strict();
+
+const level1Schema = z
+  .object({
+    merge_delay_ms: z.number().int().min(200).max(500),
+    refresh_interval_seconds: z.number().int().min(30).max(60),
+    buyers_freshness_seconds: z.number().int().positive(),
   })
   .strict();
 
@@ -88,6 +98,7 @@ const chainBaseSchema = z
   .object({
     discovery: discoverySchema,
     safety: z.unknown(),
+    level1: level1Schema,
     newborn: newbornSchema,
     established: establishedSchema,
   })

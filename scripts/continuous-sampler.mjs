@@ -1,29 +1,37 @@
 #!/usr/bin/env node
 
-import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { spawn } from "node:child_process";
-import { DatabaseSync } from "node:sqlite";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { redactSecrets } from './redact.mjs';
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const config = JSON.parse(await readFile(path.join(root, "config/preflight-sampling.json"), "utf8"));
-const envText = await readFile(path.join(root, ".env.preflight"), "utf8");
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const config = JSON.parse(
+  await readFile(path.join(root, 'config/preflight-sampling.json'), 'utf8'),
+);
+const envText = await readFile(path.join(root, '.env.preflight'), 'utf8');
 
 function envValue(key) {
   const line = envText.split(/\r?\n/u).find((item) => item.startsWith(`${key}=`));
-  return line ? line.slice(key.length + 1).trim().replace(/^(['"])(.*)\1$/u, "$2") : "";
+  return line
+    ? line
+        .slice(key.length + 1)
+        .trim()
+        .replace(/^(['"])(.*)\1$/u, '$2')
+    : '';
 }
 
-const gmgnKey = envValue("GMGN_API_KEY");
-const cgKey = envValue("COINGECKO_PRO_API_KEY");
-if (!gmgnKey || !cgKey) throw new Error("持续采样需要 GMGN_API_KEY 和 COINGECKO_PRO_API_KEY");
+const gmgnKey = envValue('GMGN_API_KEY');
+const cgKey = envValue('COINGECKO_PRO_API_KEY');
+if (!gmgnKey || !cgKey) throw new Error('持续采样需要 GMGN_API_KEY 和 COINGECKO_PRO_API_KEY');
 
 const storageDir = path.join(root, config.storage.directory);
 await mkdir(storageDir, { recursive: true });
 const db = new DatabaseSync(path.join(storageDir, config.storage.database));
-db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;");
+db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;');
 db.exec(`
   CREATE TABLE IF NOT EXISTS provider_calls (
     id INTEGER PRIMARY KEY,
@@ -163,34 +171,45 @@ const insertCredit = db.prepare(`INSERT INTO credit_samples
   VALUES (?, ?, ?, ?, ?, ?)`);
 
 function hash(value) {
-  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 
 function asText(value) {
   return value === null || value === undefined ? null : String(value);
 }
 
+function safeError(value, limit = 500) {
+  return redactSecrets(value, [gmgnKey, cgKey]).slice(0, limit);
+}
+
 function countRows(json) {
   if (Array.isArray(json)) return json.length;
-  for (const value of [json?.data?.rank, json?.data, json?.list, json?.new_creation]) if (Array.isArray(value)) return value.length;
+  for (const value of [json?.data?.rank, json?.data, json?.list, json?.new_creation])
+    if (Array.isArray(value)) return value.length;
   return null;
 }
 
 function gmgn(args) {
   return new Promise((resolve, reject) => {
-    const child = spawn("npx", ["--yes", "gmgn-cli", ...args, "--raw"], {
+    const child = spawn('npx', ['--yes', 'gmgn-cli', ...args, '--raw'], {
       cwd: root,
       env: { ...process.env, GMGN_API_KEY: gmgnKey },
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => { stdout += chunk; });
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
-    child.on("error", reject);
-    child.on("close", (code) => code === 0 ? resolve(JSON.parse(stdout)) : reject(new Error(stderr.trim() || `exit ${code}`)));
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    child.on('error', reject);
+    child.on('close', (code) =>
+      code === 0 ? resolve(JSON.parse(stdout)) : reject(new Error(stderr.trim() || `exit ${code}`)),
+    );
   });
 }
 
@@ -198,13 +217,14 @@ let gmgnNextAllowedAt = 0;
 let gmgnBlockedUntil = 0;
 async function throttledGmgn(args) {
   const waitUntil = Math.max(gmgnNextAllowedAt, gmgnBlockedUntil);
-  if (waitUntil > Date.now()) await new Promise((resolve) => setTimeout(resolve, waitUntil - Date.now()));
+  if (waitUntil > Date.now())
+    await new Promise((resolve) => setTimeout(resolve, waitUntil - Date.now()));
   gmgnNextAllowedAt = Date.now() + config.gmgn.minimum_interval_ms;
   try {
     return await gmgn(args);
   } catch (error) {
     const message = String(error.message);
-    if (message.includes("HTTP 429")) {
+    if (message.includes('HTTP 429')) {
       const remaining = Number(message.match(/~(\d+)s remaining/u)?.[1] || 30);
       gmgnBlockedUntil = Date.now() + (remaining + 3) * 1000;
     }
@@ -221,47 +241,58 @@ async function providerCall(provider, capability, chain, fn) {
     return { json, latency };
   } catch (error) {
     const latency = Math.round(performance.now() - startedAt);
-    insertCall.run(Date.now(), provider, capability, chain, 0, latency, null, String(error.message).replaceAll(cgKey, "[REDACTED]").slice(0, 500));
+    insertCall.run(
+      Date.now(),
+      provider,
+      capability,
+      chain,
+      0,
+      latency,
+      null,
+      safeError(error.message),
+    );
     return { json: null, latency, error };
   }
 }
 
 async function cg(pathname) {
   const response = await fetch(`https://pro-api.coingecko.com/api/v3${pathname}`, {
-    headers: { "x-cg-pro-api-key": cgKey },
+    headers: { 'x-cg-pro-api-key': cgKey },
     signal: AbortSignal.timeout(20_000),
   });
   const json = await response.json();
-  if (!response.ok) throw new Error(`HTTP ${response.status}: ${JSON.stringify(json).slice(0, 300)}`);
+  if (!response.ok)
+    throw new Error(`HTTP ${response.status}: ${JSON.stringify(json).slice(0, 300)}`);
   return json;
 }
 
 function normalizeCandidate(token, source, chain, interval, observedAt, rank = null) {
   const address = token.address || token.token_address;
   if (!address) return;
-  const safety = chain === "sol"
-    ? {
-        renounced_mint: token.renounced_mint,
-        renounced_freeze_account: token.renounced_freeze_account,
-        rug_ratio: token.rug_ratio,
-        bundler_rate: token.bundler_rate ?? token.bundler_trader_amount_rate,
-        rat_trader_amount_rate: token.rat_trader_amount_rate,
-        top_10_holder_rate: token.top_10_holder_rate,
-        dev_team_hold_rate: token.dev_team_hold_rate,
-        top70_sniper_hold_rate: token.top70_sniper_hold_rate,
-      }
-    : {
-        is_honeypot: token.is_honeypot,
-        is_renounced: token.is_renounced ?? token.owner_renounced,
-        is_open_source: token.is_open_source ?? token.open_source,
-        buy_tax: token.buy_tax,
-        sell_tax: token.sell_tax,
-        rug_ratio: token.rug_ratio,
-        bundler_rate: token.bundler_rate ?? token.bundler_trader_amount_rate,
-        rat_trader_amount_rate: token.rat_trader_amount_rate,
-        top_10_holder_rate: token.top_10_holder_rate,
-        dev_team_hold_rate: token.dev_team_hold_rate,
-      };
+  const safety =
+    chain === 'sol'
+      ? {
+          renounced_mint: token.renounced_mint,
+          renounced_freeze_account: token.renounced_freeze_account,
+          rug_ratio: token.rug_ratio,
+          bundler_rate: token.bundler_rate ?? token.bundler_trader_amount_rate,
+          rat_trader_amount_rate: token.rat_trader_amount_rate,
+          top_10_holder_rate: token.top_10_holder_rate,
+          dev_team_hold_rate: token.dev_team_hold_rate,
+          top70_sniper_hold_rate: token.top70_sniper_hold_rate,
+        }
+      : {
+          is_honeypot: token.is_honeypot,
+          is_renounced: token.is_renounced ?? token.owner_renounced,
+          is_open_source: token.is_open_source ?? token.open_source,
+          buy_tax: token.buy_tax,
+          sell_tax: token.sell_tax,
+          rug_ratio: token.rug_ratio,
+          bundler_rate: token.bundler_rate ?? token.bundler_trader_amount_rate,
+          rat_trader_amount_rate: token.rat_trader_amount_rate,
+          top_10_holder_rate: token.top_10_holder_rate,
+          dev_team_hold_rate: token.dev_team_hold_rate,
+        };
   const selected = {
     source,
     chain,
@@ -285,38 +316,91 @@ function normalizeCandidate(token, source, chain, interval, observedAt, rank = n
     safety,
   };
   insertCandidate.run(
-    observedAt, source, chain, interval, address, selected.pool || null, selected.created || null,
-    selected.opened || null, rank, asText(selected.price), asText(selected.price_change), asText(selected.volume),
-    asText(selected.liquidity), asText(selected.market_cap), selected.swaps ?? null, selected.buys ?? null,
-    selected.sells ?? null, selected.holders ?? null, selected.visiting ?? null, selected.hot_level ?? null,
-    JSON.stringify(safety), hash(selected),
+    observedAt,
+    source,
+    chain,
+    interval,
+    address,
+    selected.pool || null,
+    selected.created || null,
+    selected.opened || null,
+    rank,
+    asText(selected.price),
+    asText(selected.price_change),
+    asText(selected.volume),
+    asText(selected.liquidity),
+    asText(selected.market_cap),
+    selected.swaps ?? null,
+    selected.buys ?? null,
+    selected.sells ?? null,
+    selected.holders ?? null,
+    selected.visiting ?? null,
+    selected.hot_level ?? null,
+    JSON.stringify(safety),
+    hash(selected),
   );
 }
 
 async function collectDiscovery(tick) {
   const tasks = [];
-  for (const chain of ["sol", "bsc"]) {
+  for (const chain of ['sol', 'bsc']) {
     for (const interval of config.gmgn.trending_intervals) {
       tasks.push(async () => {
         const observedAt = Date.now();
-        const { json } = await providerCall("gmgn", `trending.${interval}`, chain, () => throttledGmgn(["market", "trending", "--chain", chain, "--interval", interval, "--limit", String(config.gmgn.trending_limit)]));
-        for (const [index, token] of (json?.data?.rank || []).entries()) normalizeCandidate(token, "trending", chain, interval, observedAt, index + 1);
+        const { json } = await providerCall('gmgn', `trending.${interval}`, chain, () =>
+          throttledGmgn([
+            'market',
+            'trending',
+            '--chain',
+            chain,
+            '--interval',
+            interval,
+            '--limit',
+            String(config.gmgn.trending_limit),
+          ]),
+        );
+        for (const [index, token] of (json?.data?.rank || []).entries())
+          normalizeCandidate(token, 'trending', chain, interval, observedAt, index + 1);
       });
     }
     if (tick % config.gmgn.hot_search_every_ticks === 0) {
       tasks.push(async () => {
         const observedAt = Date.now();
         const interval = config.gmgn.hot_search_interval;
-        const { json } = await providerCall("gmgn", `hot-searches.${interval}`, chain, () => throttledGmgn(["market", "hot-searches", "--chain", chain, "--interval", interval, "--limit", String(config.gmgn.hot_search_limit)]));
+        const { json } = await providerCall('gmgn', `hot-searches.${interval}`, chain, () =>
+          throttledGmgn([
+            'market',
+            'hot-searches',
+            '--chain',
+            chain,
+            '--interval',
+            interval,
+            '--limit',
+            String(config.gmgn.hot_search_limit),
+          ]),
+        );
         const group = Array.isArray(json) ? json.find((item) => item.chain === chain) : null;
-        for (const [index, token] of (group?.tokens || []).entries()) normalizeCandidate(token, "hot-searches", chain, interval, observedAt, index + 1);
+        for (const [index, token] of (group?.tokens || []).entries())
+          normalizeCandidate(token, 'hot-searches', chain, interval, observedAt, index + 1);
       });
     }
     if (tick % config.gmgn.trenches_every_ticks === 0) {
       tasks.push(async () => {
         const observedAt = Date.now();
-        const { json } = await providerCall("gmgn", "trenches", chain, () => throttledGmgn(["market", "trenches", "--chain", chain, "--type", "new_creation", "--limit", String(config.gmgn.trenches_limit)]));
-        for (const token of (json?.new_creation || [])) normalizeCandidate(token, "trenches", chain, "new_creation", observedAt);
+        const { json } = await providerCall('gmgn', 'trenches', chain, () =>
+          throttledGmgn([
+            'market',
+            'trenches',
+            '--chain',
+            chain,
+            '--type',
+            'new_creation',
+            '--limit',
+            String(config.gmgn.trenches_limit),
+          ]),
+        );
+        for (const token of json?.new_creation || [])
+          normalizeCandidate(token, 'trenches', chain, 'new_creation', observedAt);
       });
     }
   }
@@ -325,7 +409,9 @@ async function collectDiscovery(tick) {
 
 function recentCandidates(chain) {
   const cutoff = Date.now() - config.coingecko.pending_ttl_minutes * 60_000;
-  return db.prepare(`
+  return db
+    .prepare(
+      `
     SELECT c.token_address, MIN(c.observed_at) AS first_seen_at, MIN(c.created_at) AS created_at
     FROM candidate_observations c
     LEFT JOIN token_pools p ON p.chain=c.chain AND p.token_address=c.token_address
@@ -333,52 +419,106 @@ function recentCandidates(chain) {
     GROUP BY c.token_address
     ORDER BY first_seen_at DESC
     LIMIT ?
-  `).all(chain, cutoff, config.coingecko.max_tokens_per_chain);
+  `,
+    )
+    .all(chain, cutoff, config.coingecko.max_tokens_per_chain);
 }
 
 async function collectIndexing() {
-  for (const [chain, network] of [["sol", "solana"], ["bsc", "bsc"]]) {
+  for (const [chain, network] of [
+    ['sol', 'solana'],
+    ['bsc', 'bsc'],
+  ]) {
     const candidates = recentCandidates(chain);
     if (!candidates.length) continue;
     const addresses = candidates.map((item) => item.token_address);
     const attemptedAt = Date.now();
-    const { json, latency, error } = await providerCall("coingecko", "tokens.multi.indexing", chain, () => cg(`/onchain/networks/${network}/tokens/multi/${addresses.join(",")}?include=top_pools`));
+    const { json, latency, error } = await providerCall(
+      'coingecko',
+      'tokens.multi.indexing',
+      chain,
+      () =>
+        cg(`/onchain/networks/${network}/tokens/multi/${addresses.join(',')}?include=top_pools`),
+    );
     const tokenMap = new Map((json?.data || []).map((item) => [item.attributes?.address, item]));
-    const includedMap = new Map((json?.included || []).filter((item) => item.type === "pool").map((item) => [item.id, item]));
+    const includedMap = new Map(
+      (json?.included || []).filter((item) => item.type === 'pool').map((item) => [item.id, item]),
+    );
     for (const candidate of candidates) {
       const token = tokenMap.get(candidate.token_address);
       const poolId = token?.relationships?.top_pools?.data?.[0]?.id;
       const pool = includedMap.get(poolId);
-      const poolAddress = pool?.attributes?.address || (poolId ? poolId.replace(`${network}_`, "") : null);
-      const poolCreatedAt = pool?.attributes?.pool_created_at ? Date.parse(pool.attributes.pool_created_at) : null;
+      const poolAddress =
+        pool?.attributes?.address || (poolId ? poolId.replace(`${network}_`, '') : null);
+      const poolCreatedAt = pool?.attributes?.pool_created_at
+        ? Date.parse(pool.attributes.pool_created_at)
+        : null;
       const indexed = Boolean(poolAddress);
       const baseTime = candidate.created_at ? candidate.created_at * 1000 : candidate.first_seen_at;
-      const indexingLatency = indexed ? Math.max(0, Math.round((attemptedAt - baseTime) / 1000)) : null;
-      insertIndexing.run(attemptedAt, chain, candidate.token_address, candidate.first_seen_at, candidate.created_at || null, indexed ? 1 : 0, poolAddress, poolCreatedAt, indexingLatency, latency, error ? String(error.message).slice(0, 500) : null);
-      if (indexed) upsertPool.run(chain, candidate.token_address, poolAddress, attemptedAt, poolCreatedAt, attemptedAt);
+      const indexingLatency = indexed
+        ? Math.max(0, Math.round((attemptedAt - baseTime) / 1000))
+        : null;
+      insertIndexing.run(
+        attemptedAt,
+        chain,
+        candidate.token_address,
+        candidate.first_seen_at,
+        candidate.created_at || null,
+        indexed ? 1 : 0,
+        poolAddress,
+        poolCreatedAt,
+        indexingLatency,
+        latency,
+        error ? safeError(error.message) : null,
+      );
+      if (indexed)
+        upsertPool.run(
+          chain,
+          candidate.token_address,
+          poolAddress,
+          attemptedAt,
+          poolCreatedAt,
+          attemptedAt,
+        );
     }
   }
 }
 
 async function collectPoolSnapshots() {
   const cutoff = Date.now() - config.coingecko.active_pool_ttl_minutes * 60_000;
-  for (const [chain, network] of [["sol", "solana"], ["bsc", "bsc"]]) {
-    const rows = db.prepare(`
+  for (const [chain, network] of [
+    ['sol', 'solana'],
+    ['bsc', 'bsc'],
+  ]) {
+    const rows = db
+      .prepare(
+        `
       SELECT p.chain, p.token_address, p.pool_address, p.pool_created_at
       FROM token_pools p
       WHERE p.chain=? AND p.last_seen_at>=?
       ORDER BY p.first_indexed_at DESC
       LIMIT ?
-    `).all(chain, cutoff, config.coingecko.max_pools_per_chain);
+    `,
+      )
+      .all(chain, cutoff, config.coingecko.max_pools_per_chain);
     if (!rows.length) continue;
     const addresses = rows.map((item) => item.pool_address);
     const observedAt = Date.now();
-    const { json } = await providerCall("coingecko", "pools.multi.snapshot", chain, () => cg(`/onchain/networks/${network}/pools/multi/${addresses.join(",")}?include=base_token,quote_token&include_volume_breakdown=true&include_composition=true`));
-    const poolMap = new Map(rows.map((item) => [chain === "bsc" ? item.pool_address.toLowerCase() : item.pool_address, item]));
-    for (const item of (json?.data || [])) {
+    const { json } = await providerCall('coingecko', 'pools.multi.snapshot', chain, () =>
+      cg(
+        `/onchain/networks/${network}/pools/multi/${addresses.join(',')}?include=base_token,quote_token&include_volume_breakdown=true&include_composition=true`,
+      ),
+    );
+    const poolMap = new Map(
+      rows.map((item) => [
+        chain === 'bsc' ? item.pool_address.toLowerCase() : item.pool_address,
+        item,
+      ]),
+    );
+    for (const item of json?.data || []) {
       const attributes = item.attributes || {};
       const address = attributes.address;
-      const local = poolMap.get(chain === "bsc" ? address?.toLowerCase() : address);
+      const local = poolMap.get(chain === 'bsc' ? address?.toLowerCase() : address);
       if (!local) continue;
       const selected = {
         transactions: attributes.transactions,
@@ -388,11 +528,19 @@ async function collectPoolSnapshots() {
         reserve: attributes.reserve_in_usd,
       };
       insertSnapshot.run(
-        observedAt, chain, local.token_address, address, local.pool_created_at,
-        asText(attributes.reserve_in_usd), item.relationships?.base_token?.data?.id || null,
-        item.relationships?.quote_token?.data?.id || null, JSON.stringify(attributes.transactions || null),
-        JSON.stringify(attributes.volume_usd || null), JSON.stringify(attributes.net_buy_volume_usd || null),
-        JSON.stringify(attributes.price_change_percentage || null), hash(selected),
+        observedAt,
+        chain,
+        local.token_address,
+        address,
+        local.pool_created_at,
+        asText(attributes.reserve_in_usd),
+        item.relationships?.base_token?.data?.id || null,
+        item.relationships?.quote_token?.data?.id || null,
+        JSON.stringify(attributes.transactions || null),
+        JSON.stringify(attributes.volume_usd || null),
+        JSON.stringify(attributes.net_buy_volume_usd || null),
+        JSON.stringify(attributes.price_change_percentage || null),
+        hash(selected),
       );
     }
   }
@@ -400,67 +548,125 @@ async function collectPoolSnapshots() {
 
 let remainingCredits = Infinity;
 async function collectCredits() {
-  const { json } = await providerCall("coingecko", "key", null, () => cg("/key"));
+  const { json } = await providerCall('coingecko', 'key', null, () => cg('/key'));
   if (!json) return;
   const monthly = json.api_key_monthly_call_credit;
   const used = json.api_key_current_total_monthly_calls;
   remainingCredits = Number(monthly) - Number(used);
-  insertCredit.run(Date.now(), json.plan || null, json.api_key_rate_limit_request_per_minute || null, monthly || null, used || null, remainingCredits);
+  insertCredit.run(
+    Date.now(),
+    json.plan || null,
+    json.api_key_rate_limit_request_per_minute || null,
+    monthly || null,
+    used || null,
+    remainingCredits,
+  );
 }
 
 function wsOne(channel, code, chain, network, poolAddress, durationMs) {
   return new Promise((resolve) => {
     const identifier = JSON.stringify({ channel });
-    const socket = new WebSocket(`wss://stream.coingecko.com/v1?x_cg_pro_api_key=${encodeURIComponent(cgKey)}`);
+    const socket = new WebSocket(
+      `wss://stream.coingecko.com/v1?x_cg_pro_api_key=${encodeURIComponent(cgKey)}`,
+    );
     let messages = 0;
     let ack = false;
     let closed = false;
     const close = () => {
       if (closed) return;
       closed = true;
-      try { socket.close(); } catch {}
+      try {
+        socket.close();
+      } catch {}
       resolve({ messages, ack });
     };
     const timer = setTimeout(close, durationMs);
-    socket.addEventListener("open", () => socket.send(JSON.stringify({ command: "subscribe", identifier })));
-    socket.addEventListener("message", (event) => {
+    socket.addEventListener('open', () =>
+      socket.send(JSON.stringify({ command: 'subscribe', identifier })),
+    );
+    socket.addEventListener('message', (event) => {
       let data;
-      try { data = JSON.parse(String(event.data)); } catch { return; }
-      if (data.type === "confirm_subscription") {
-        socket.send(JSON.stringify({
-          command: "message",
-          identifier,
-          data: JSON.stringify({
-            "network_id:pool_addresses": [`${network}:${poolAddress}`],
-            action: "set_pools",
-            ...(code === "G3" ? { interval: "1m", token: "base" } : {}),
+      try {
+        data = JSON.parse(String(event.data));
+      } catch {
+        return;
+      }
+      if (data.type === 'confirm_subscription') {
+        socket.send(
+          JSON.stringify({
+            command: 'message',
+            identifier,
+            data: JSON.stringify({
+              'network_id:pool_addresses': [`${network}:${poolAddress}`],
+              action: 'set_pools',
+              ...(code === 'G3' ? { interval: '1m', token: 'base' } : {}),
+            }),
           }),
-        }));
+        );
       } else if (data.code === 2000) {
         ack = true;
       } else if (data.c === code || data.ch === code) {
         messages += 1;
         insertWs.run(
-          Date.now(), code, chain, poolAddress, data.t || null, data.tx || null, data.ty || null,
-          asText(data.to), asText(data.toq), asText(data.vo), asText(data.pu),
-          code === "G3" ? JSON.stringify({ interval: data.i, open: data.o, high: data.h, low: data.l, close: data.c, volume: data.v }) : null,
+          Date.now(),
+          code,
+          chain,
+          poolAddress,
+          data.t || null,
+          data.tx || null,
+          data.ty || null,
+          asText(data.to),
+          asText(data.toq),
+          asText(data.vo),
+          asText(data.pu),
+          code === 'G3'
+            ? JSON.stringify({
+                interval: data.i,
+                open: data.o,
+                high: data.h,
+                low: data.l,
+                close: data.c,
+                volume: data.v,
+              })
+            : null,
           hash(data),
         );
       }
     });
-    socket.addEventListener("error", close);
-    socket.addEventListener("close", () => { clearTimeout(timer); close(); });
+    socket.addEventListener('error', close);
+    socket.addEventListener('close', () => {
+      clearTimeout(timer);
+      close();
+    });
   });
 }
 
 async function collectWebsocket() {
   const jobs = [];
-  for (const [chain, network] of [["sol", "solana"], ["bsc", "bsc"]]) {
-    const rows = db.prepare(`SELECT pool_address FROM token_pools WHERE chain=? ORDER BY first_indexed_at DESC LIMIT ?`).all(chain, config.websocket.pools_per_chain);
+  for (const [chain, network] of [
+    ['sol', 'solana'],
+    ['bsc', 'bsc'],
+  ]) {
+    const rows = db
+      .prepare(
+        `SELECT pool_address FROM token_pools WHERE chain=? ORDER BY first_indexed_at DESC LIMIT ?`,
+      )
+      .all(chain, config.websocket.pools_per_chain);
     for (const row of rows) {
       for (const code of config.websocket.channels) {
-        const channel = code === "G2" ? "OnchainTrade" : "OnchainOHLCV";
-        jobs.push(providerCall("coingecko-ws", code, chain, () => wsOne(channel, code, chain, network, row.pool_address, config.websocket.burst_seconds * 1000)));
+        const channel = code === 'G2' ? 'OnchainTrade' : 'OnchainOHLCV';
+        jobs.push(
+          providerCall('coingecko-ws', code, chain, () =>
+            wsOne(
+              channel,
+              code,
+              chain,
+              network,
+              row.pool_address,
+              config.websocket.burst_seconds * 1000,
+            ),
+          ),
+        );
       }
     }
   }
@@ -475,8 +681,12 @@ async function writeStatus(status) {
 }
 
 let stopping = false;
-process.on("SIGTERM", () => { stopping = true; });
-process.on("SIGINT", () => { stopping = true; });
+process.on('SIGTERM', () => {
+  stopping = true;
+});
+process.on('SIGINT', () => {
+  stopping = true;
+});
 
 let tick = 0;
 let lastError = null;
@@ -487,28 +697,38 @@ while (!stopping) {
   tick += 1;
   try {
     await collectDiscovery(tick);
-    const creditSamplingAllowed = !config.coingecko.enforce_minimum_remaining_credits
-      || remainingCredits > config.coingecko.minimum_remaining_credits;
+    const creditSamplingAllowed =
+      !config.coingecko.enforce_minimum_remaining_credits ||
+      remainingCredits > config.coingecko.minimum_remaining_credits;
     if (creditSamplingAllowed) {
       if (tick % config.coingecko.index_check_every_ticks === 0) await collectIndexing();
       if (tick % config.coingecko.pool_snapshot_every_ticks === 0) await collectPoolSnapshots();
       if (tick % config.coingecko.usage_check_every_ticks === 0) await collectCredits();
-      if (config.websocket.enabled && (tick === 1 || tick % config.websocket.burst_every_ticks === 0)) await collectWebsocket();
+      if (
+        config.websocket.enabled &&
+        (tick === 1 || tick % config.websocket.burst_every_ticks === 0)
+      )
+        await collectWebsocket();
     }
     lastError = null;
   } catch (error) {
-    lastError = String(error.message).replaceAll(cgKey, "[REDACTED]").slice(0, 1000);
+    lastError = safeError(error.message, 1000);
   }
-  const counts = Object.fromEntries([
-    ["candidate_observations", "candidate_observations"],
-    ["indexing_attempts", "indexing_attempts"],
-    ["token_pools", "token_pools"],
-    ["pool_snapshots", "pool_snapshots"],
-    ["websocket_events", "websocket_events"],
-    ["provider_calls", "provider_calls"],
-  ].map(([key, table]) => [key, db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count]));
+  const counts = Object.fromEntries(
+    [
+      ['candidate_observations', 'candidate_observations'],
+      ['indexing_attempts', 'indexing_attempts'],
+      ['token_pools', 'token_pools'],
+      ['pool_snapshots', 'pool_snapshots'],
+      ['websocket_events', 'websocket_events'],
+      ['provider_calls', 'provider_calls'],
+    ].map(([key, table]) => [
+      key,
+      db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count,
+    ]),
+  );
   await writeStatus({
-    state: stopping ? "stopping" : "running",
+    state: stopping ? 'stopping' : 'running',
     pid: process.pid,
     process_started_at: new Date(processStartedAt).toISOString(),
     tick,
@@ -523,5 +743,12 @@ while (!stopping) {
   if (!stopping) await new Promise((resolve) => setTimeout(resolve, waitMs));
 }
 
-await writeStatus({ state: "stopped", pid: process.pid, process_started_at: new Date(processStartedAt).toISOString(), tick, updated_at: new Date().toISOString(), last_error: lastError });
+await writeStatus({
+  state: 'stopped',
+  pid: process.pid,
+  process_started_at: new Date(processStartedAt).toISOString(),
+  tick,
+  updated_at: new Date().toISOString(),
+  last_error: lastError,
+});
 db.close();

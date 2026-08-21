@@ -88,6 +88,23 @@ const discoverySourceCoverage = all(`
   GROUP BY c.chain, c.source
   ORDER BY c.chain, c.source
 `);
+const productionDiscoverySources = ['trending', 'hot-searches'];
+const productionDiscoveryCoverage = all(
+  `
+  SELECT c.chain,
+         COUNT(DISTINCT c.token_address) AS candidate_tokens,
+         COUNT(DISTINCT CASE WHEN p.token_address IS NOT NULL THEN c.token_address END)
+           AS indexed_tokens,
+         ROUND(100.0 * COUNT(DISTINCT CASE WHEN p.token_address IS NOT NULL THEN c.token_address END)
+               / COUNT(DISTINCT c.token_address), 2) AS indexed_rate_percent
+  FROM candidate_observations c
+  LEFT JOIN token_pools p ON p.chain = c.chain AND p.token_address = c.token_address
+  WHERE c.source IN (?, ?)
+  GROUP BY c.chain
+  ORDER BY c.chain
+`,
+  ...productionDiscoverySources,
+);
 const credits = all(`
   SELECT observed_at, plan, rpm, monthly_credit, used_credit, remaining_credit
   FROM credit_samples
@@ -119,11 +136,10 @@ const providerCallCount = Number(sampleRange?.provider_call_count ?? 0);
 const observedMinutes = sampleDurationMs / 60_000;
 const observedCallsPerMinute = observedMinutes > 0 ? providerCallCount / observedMinutes : null;
 const hasProviderFailures = provider.some((row) => Number(row.failures ?? 0) > 0);
-const hasInsufficientIndexing =
-  indexing.length === 0 ||
-  indexing.some(
-    (row) =>
-      row.unique_indexed_rate_percent === null || Number(row.unique_indexed_rate_percent) < 95,
+const hasInsufficientProductionDiscovery =
+  productionDiscoveryCoverage.length === 0 ||
+  productionDiscoveryCoverage.some(
+    (row) => row.indexed_rate_percent === null || Number(row.indexed_rate_percent) < 95,
   );
 const outcomeEvidence = outcomeTables.length
   ? { available: true, tables: outcomeTables.map((row) => row.name) }
@@ -172,6 +188,10 @@ const result = {
   provider,
   indexing,
   discoverySourceCoverage,
+  productionDiscoveryCoverage: {
+    sources: productionDiscoverySources,
+    chains: productionDiscoveryCoverage,
+  },
   websocket_events: Number(websocketEvents?.events ?? 0),
   credits: {
     samples: credits.length,
@@ -190,7 +210,7 @@ const result = {
   productionRecommendation:
     providerCallCount === 0 ||
     hasProviderFailures ||
-    hasInsufficientIndexing ||
+    hasInsufficientProductionDiscovery ||
     credits.length < 10 ||
     !outcomeEvidence.available ||
     parameterSensitivity.status === 'not_estimable'

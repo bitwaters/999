@@ -46,3 +46,7 @@
 #### Scenario: 配置升级后复用旧 pass
 - **WHEN** 候选的安全 pass 属于旧 config version
 - **THEN** 系统使用保存的 raw 按新版本重算，raw 不足时重新请求，失败则不推送
+
+#### Scenario: 确认窗口到达时安全 pass 已过期
+- **WHEN** G2 窗口已具备确认价值，但候选安全 pass 已过期
+- **THEN** 系统先按对应链重新请求 GMGN Token Security 并保存新证据；只有新结果为 pass 才允许为该候选刷新 CoinGecko Level 1

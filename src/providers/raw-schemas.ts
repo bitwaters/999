@@ -9,7 +9,17 @@ export const gmgnHotSearchesRawSchema = z.array(
   z.object({ chain: z.string(), tokens: z.array(looseObject) }).passthrough(),
 );
 export const gmgnSecurityRawSchema = z
-  .object({ code: z.number(), data: looseObject })
+  .object({
+    address: z.string(),
+    renounced_mint: z.unknown().optional(),
+    renounced_freeze_account: z.unknown().optional(),
+    is_honeypot: z.unknown().optional(),
+    is_renounced: z.unknown().optional(),
+    owner_renounced: z.unknown().optional(),
+    is_open_source: z.unknown().optional(),
+    buy_tax: z.unknown().optional(),
+    sell_tax: z.unknown().optional(),
+  })
   .passthrough();
 export const gmgnTokenPoolRawSchema = z
   .object({ code: z.number(), data: looseObject })

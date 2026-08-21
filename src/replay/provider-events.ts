@@ -18,6 +18,25 @@ export function extractReplayProviderEvent(
   if (!chain) return { discovery: [], evidence: [] };
   if (row.provider === 'gmgn' && row.capability.startsWith('market.'))
     return extractGmgn({ ...row, chain }, payload);
+  if (row.provider === 'gmgn' && row.capability === 'token.security') {
+    const tokenAddress = row.token_address
+      ? normalizeToken(chain, row.token_address)
+      : normalizeToken(chain, asRecord(payload).address);
+    return tokenAddress
+      ? {
+          discovery: [],
+          evidence: [
+            {
+              kind: 'safety',
+              chain,
+              tokenAddress,
+              observedAt: row.observed_at,
+              payload,
+            },
+          ],
+        }
+      : { discovery: [], evidence: [] };
+  }
   if (row.provider !== 'coingecko') return { discovery: [], evidence: [] };
   const base = { chain, observedAt: row.observed_at, payload };
   if (row.capability === 'tokens.multi')

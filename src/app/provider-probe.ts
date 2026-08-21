@@ -11,6 +11,7 @@ import { requestJson, type HttpClientOptions } from '../providers/http.js';
 import { gmgnTrendingRawSchema } from '../providers/raw-schemas.js';
 import {
   gmgnHotSearchesRawSchema,
+  gmgnSecurityRawSchema,
   coingeckoPoolBatchRawSchema,
   coingeckoTradesRawSchema,
   coingeckoG2RawSchema,
@@ -23,7 +24,12 @@ import {
   type DiscoveryObservation,
 } from '../pipeline/candidate.js';
 import { readDiskHealth } from '../runtime/health.js';
-import { evaluateBscSafety, evaluateSolSafety, type SafetyResult } from '../domain/safety.js';
+import {
+  canReuseSafetyPass,
+  evaluateBscSafety,
+  evaluateSolSafety,
+  type SafetyResult,
+} from '../domain/safety.js';
 import { parsePool, selectPrimaryPool, type CanonicalPool } from '../market-data/pools.js';
 import { assertAnalystEndpoint } from '../providers/http.js';
 import { parseDecimalString } from '../providers/parsing.js';
@@ -114,6 +120,54 @@ export function level1ProbeState(attempted: number, complete: number): ProbeStat
     throw new Error('Invalid Level 1 probe counts');
   if (attempted === 0) return 'unknown';
   return complete > 0 ? 'ok' : 'failed';
+}
+
+export function sameChainAddress(
+  chain: 'sol' | 'bsc',
+  left: string,
+  right: string,
+): boolean {
+  return chain === 'bsc' ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
+export function isConfirmationWindowUsable(now: number, windowEnd: number): boolean {
+  return (
+    Number.isSafeInteger(now) &&
+    Number.isSafeInteger(windowEnd) &&
+    windowEnd <= now &&
+    now - windowEnd <= 30_000
+  );
+}
+
+export function shouldRefreshConfirmationEvidence(reasons: readonly string[]): boolean {
+  const unique = [...new Set(reasons)];
+  const refreshable = new Set([
+    'safety:not_fresh_or_config_mismatch',
+    'level1:stale',
+    'pool:unstable',
+  ]);
+  const hasRefreshableGap = unique.some((reason) => refreshable.has(reason));
+  if (!hasRefreshableGap) return false;
+  return unique.every(
+    (reason) => refreshable.has(reason) || reason === 'conviction:incomplete',
+  );
+}
+
+export async function refreshConfirmationEvidence(input: {
+  now: () => number;
+  configVersionId: string;
+  refreshSafety: () => Promise<SafetyResult>;
+  refreshLevel1: () => Promise<Level1Snapshot | undefined>;
+}): Promise<
+  | { status: 'complete'; safety: SafetyResult; level1: Level1Snapshot }
+  | { status: 'blocked'; reason: string; safety: SafetyResult }
+> {
+  const safety = await input.refreshSafety();
+  if (!canReuseSafetyPass(safety, input.now(), input.configVersionId))
+    return { status: 'blocked', reason: `safety:${safety.status}`, safety };
+  const level1 = await input.refreshLevel1();
+  if (!level1) return { status: 'blocked', reason: 'level1:incomplete', safety };
+  return { status: 'complete', safety, level1 };
 }
 
 export function shouldRearmG2Candidate(status: string, funnelStatus: string): boolean {
@@ -299,8 +353,8 @@ export function expireStaleCandidateRows(
   if (rows.length === 0) return [];
   boundedWrite(database, budget, (context) => {
     const update = database.prepare(
-      `UPDATE candidates SET status = 'expired', funnel_status = 'expired',
-       close_reason = 'discovery_ttl', updated_at = ? WHERE id = ?`,
+      `UPDATE candidates SET status = 'expired', close_reason = 'discovery_ttl',
+       updated_at = ? WHERE id = ?`,
     );
     for (const row of rows) context.addRows(update.run(now, row.id).changes);
   });
@@ -339,7 +393,11 @@ export class ProviderProbe {
   private g2QueueIncomplete = false;
   private readonly signalCheckTimers = new Map<string, NodeJS.Timeout>();
   private readonly signalBlockLogKeys = new Set<string>();
+  private readonly confirmationRefreshAttempted = new Set<string>();
+  private readonly confirmationRefreshes = new Set<Promise<void>>();
   private readonly outcomePollAt = new Map<string, number>();
+  private gmgnRequestTail: Promise<void> = Promise.resolve();
+  private lastGmgnRequestAt = 0;
   private telegram: ProbeState = 'unknown';
   private lastProbeAt: number | undefined;
   private lastError: string | undefined;
@@ -395,6 +453,7 @@ export class ProviderProbe {
     await this.inFlight;
     await this.g2DrainInFlight;
     await this.g2Client?.stop();
+    await Promise.allSettled([...this.confirmationRefreshes]);
   }
 
   public status(): ProviderProbeStatus {
@@ -520,8 +579,6 @@ export class ProviderProbe {
   }
 
   private async probeGmgn(): Promise<void> {
-    const key = this.options.secrets[this.options.config.providers.gmgn.api_key_env];
-    if (!key) throw new Error('GMGN secret is not configured');
     try {
       const disk = readDiskHealth(
         path.dirname(path.resolve(this.options.config.storage.database_path)),
@@ -531,8 +588,7 @@ export class ProviderProbe {
       for (const chain of ['sol', 'bsc'] as const) {
         const intervals = this.options.config.chains[chain].discovery.trending_intervals;
         for (const interval of intervals) {
-          const observedAt = Date.now();
-          const raw = await runGmgn(
+          const raw = await this.requestGmgn(
             [
               'market',
               'trending',
@@ -543,17 +599,15 @@ export class ProviderProbe {
               '--limit',
               String(this.options.config.chains[chain].discovery.max_candidates),
             ],
-            key,
-            this.options.config.providers.gmgn.request_timeout_ms,
           );
+          const observedAt = Date.now();
           const parsed = gmgnTrendingRawSchema.parse(JSON.parse(raw));
           const event = this.recordGmgnEvent(raw, `market.trending.${interval}`, chain, observedAt);
           this.ingestTrending(chain, interval, parsed.data.rank, observedAt, event.id);
           await delay(this.options.config.providers.gmgn.rate_limit.minimum_interval_ms);
         }
 
-        const observedAt = Date.now();
-        const raw = await runGmgn(
+        const raw = await this.requestGmgn(
           [
             'market',
             'hot-searches',
@@ -564,9 +618,8 @@ export class ProviderProbe {
             '--limit',
             String(this.options.config.chains[chain].discovery.max_candidates),
           ],
-          key,
-          this.options.config.providers.gmgn.request_timeout_ms,
         );
+        const observedAt = Date.now();
         const parsed = gmgnHotSearchesRawSchema.parse(JSON.parse(raw));
         const event = this.recordGmgnEvent(raw, 'market.hot-searches.1m', chain, observedAt);
         const group = parsed.find((item) => item.chain === chain);
@@ -607,6 +660,31 @@ export class ProviderProbe {
       },
       this.options.writeBudget,
     );
+  }
+
+  private requestGmgn(args: string[]): Promise<string> {
+    const execute = async () => {
+      const key = this.options.secrets[this.options.config.providers.gmgn.api_key_env];
+      if (!key) throw new Error('GMGN secret is not configured');
+      const minimumInterval = this.options.config.providers.gmgn.rate_limit.minimum_interval_ms;
+      const remaining = minimumInterval - (Date.now() - this.lastGmgnRequestAt);
+      if (remaining > 0) await delay(remaining);
+      try {
+        return await runGmgn(
+          args,
+          key,
+          this.options.config.providers.gmgn.request_timeout_ms,
+        );
+      } finally {
+        this.lastGmgnRequestAt = Date.now();
+      }
+    };
+    const request = this.gmgnRequestTail.then(execute, execute);
+    this.gmgnRequestTail = request.then(
+      () => undefined,
+      () => undefined,
+    );
+    return request;
   }
 
   private ingestTrending(
@@ -808,8 +886,7 @@ export class ProviderProbe {
     boundedWrite(this.options.database, this.options.writeBudget, (context) => {
       const info = this.options.database
         .prepare(
-          `UPDATE candidates SET status = 'expired', funnel_status = 'expired',
-           close_reason = 'discovery_ttl', updated_at = ?
+          `UPDATE candidates SET status = 'expired', close_reason = 'discovery_ttl', updated_at = ?
            WHERE chain = ? AND token_address = ? AND cycle_started_at = ?
              AND status IN ('scouting', 'safety_pending', 'qualified', 'armed', 'rejected', 'incomplete')`,
         )
@@ -1418,7 +1495,7 @@ export class ProviderProbe {
         .run(reason, signalId);
       const candidate = this.options.database
         .prepare(
-          `UPDATE candidates SET status = 'expired', funnel_status = 'expired', close_reason = ?, updated_at = ?
+          `UPDATE candidates SET status = 'expired', close_reason = ?, updated_at = ?
            WHERE id = (SELECT candidate_id FROM signals WHERE id = ?) AND status != 'completed'`,
         )
         .run(reason, Date.now(), signalId);
@@ -1578,7 +1655,11 @@ export class ProviderProbe {
     }
   }
 
-  private tryCreateLiveSignal(trade: NormalizedTrade): void {
+  private tryCreateLiveSignal(
+    trade: NormalizedTrade,
+    allowRefresh = true,
+    confirmationWindowEnd?: number,
+  ): void {
     const cycle = this.trackers[trade.chain].get(trade.chain, trade.tokenAddress);
     if (!cycle) {
       this.logSignalBlocked(trade, ['cycle:missing']);
@@ -1617,7 +1698,14 @@ export class ProviderProbe {
       return;
     }
     const now = Date.now();
-    const windowEnd = Math.floor(now / 30_000) * 30_000;
+    const windowEnd = confirmationWindowEnd ?? Math.floor(now / 30_000) * 30_000;
+    if (
+      confirmationWindowEnd !== undefined &&
+      !isConfirmationWindowUsable(now, confirmationWindowEnd)
+    ) {
+      this.logSignalBlocked(trade, ['g2:stale']);
+      return;
+    }
     if (trade.eventAt >= windowEnd) {
       this.scheduleSignalCheck(trade, windowEnd + 100);
       return;
@@ -1668,6 +1756,14 @@ export class ProviderProbe {
     }
     if (result.status !== 'created') {
       this.logSignalBlocked(trade, result.reasons);
+      if (allowRefresh && shouldRefreshConfirmationEvidence(result.reasons))
+        this.scheduleConfirmationRefresh(
+          trade,
+          candidate.id,
+          pool,
+          windowEnd,
+          result.reasons,
+        );
       return;
     }
     this.g2Client?.request(pool, 'confirmed-pending-anchor');
@@ -1677,6 +1773,237 @@ export class ProviderProbe {
       chain: trade.chain,
       pool_address: trade.poolAddress,
     });
+  }
+
+  private scheduleConfirmationRefresh(
+    trade: NormalizedTrade,
+    candidateId: number,
+    pool: CanonicalPool,
+    windowEnd: number,
+    reasons: readonly string[],
+  ): void {
+    const key = `${trade.chain}:${trade.poolAddress}:${trade.tokenAddress}:${windowEnd}`;
+    if (this.stopping || this.confirmationRefreshAttempted.has(key)) return;
+    if (this.confirmationRefreshAttempted.size >= 10_000)
+      this.confirmationRefreshAttempted.clear();
+    this.confirmationRefreshAttempted.add(key);
+    this.options.logger('info', 'confirmation_evidence_refresh_started', {
+      chain: trade.chain,
+      pool_address: trade.poolAddress,
+      window_end: windowEnd,
+      reasons: [...new Set(reasons)].sort(),
+    });
+    const refresh = refreshConfirmationEvidence({
+      now: Date.now,
+      configVersionId: String(this.options.configVersionId),
+      refreshSafety: () => this.refreshCandidateSafety(candidateId, trade),
+      refreshLevel1: () => this.refreshConfirmationLevel1(candidateId, pool),
+    })
+      .then((result) => {
+        if (result.status === 'blocked') {
+          if (result.reason.startsWith('safety:')) this.g2Client?.unset(pool.identityKey);
+          this.options.logger('info', 'confirmation_evidence_refresh_blocked', {
+            chain: trade.chain,
+            pool_address: trade.poolAddress,
+            window_end: windowEnd,
+            reason: result.reason,
+          });
+          return;
+        }
+        this.options.logger('info', 'confirmation_evidence_refresh_completed', {
+          chain: trade.chain,
+          pool_address: trade.poolAddress,
+          window_end: windowEnd,
+        });
+        if (!this.stopping) this.tryCreateLiveSignal(trade, false, windowEnd);
+      })
+      .catch((error: unknown) => {
+        this.options.logger('warn', 'confirmation_evidence_refresh_failed', {
+          chain: trade.chain,
+          pool_address: trade.poolAddress,
+          window_end: windowEnd,
+          error: this.safeError(error),
+        });
+      });
+    this.confirmationRefreshes.add(refresh);
+    void refresh.then(
+      () => this.confirmationRefreshes.delete(refresh),
+      () => this.confirmationRefreshes.delete(refresh),
+    );
+  }
+
+  private async refreshCandidateSafety(
+    candidateId: number,
+    trade: NormalizedTrade,
+  ): Promise<SafetyResult> {
+    const raw = await this.requestGmgn([
+      'token',
+      'security',
+      '--chain',
+      trade.chain,
+      '--address',
+      trade.tokenAddress,
+    ]);
+    const parsed = gmgnSecurityRawSchema.parse(JSON.parse(raw));
+    const observedAt = Date.now();
+    const event = insertProviderEvent(
+      this.options.database,
+      {
+        provider: 'gmgn',
+        capability: 'token.security',
+        chain: trade.chain,
+        tokenAddress: parsed.address,
+        observedAt,
+        schemaVersion: 'gmgn.security.v1',
+        payload: raw,
+        requestMeta: {
+          endpoint_name: 'token.security',
+          method: 'cli',
+          response_bytes: Buffer.byteLength(raw),
+        },
+      },
+      this.options.writeBudget,
+    );
+    if (!sameChainAddress(trade.chain, parsed.address, trade.tokenAddress))
+      throw new Error('identity:token_address');
+    const safety = this.evaluateSafety(trade.chain, parsed, event.id, observedAt);
+    let candidateActive = false;
+    boundedWrite(this.options.database, this.options.writeBudget, (context) => {
+      const info = this.options.database
+        .prepare(
+          `UPDATE candidates SET safety_status = ?, safety_json = ?, updated_at = ?
+           WHERE id = ? AND chain = ? AND token_address = ? AND config_version_id = ?
+             AND status != 'expired'`,
+        )
+        .run(
+          safety.status,
+          JSON.stringify(safety),
+          observedAt,
+          candidateId,
+          trade.chain,
+          trade.tokenAddress,
+          this.options.configVersionId,
+        );
+      context.addRows(info.changes);
+      candidateActive = info.changes === 1;
+    });
+    if (!candidateActive) throw new Error('candidate:no_longer_active');
+    return safety;
+  }
+
+  private async refreshConfirmationLevel1(
+    candidateId: number,
+    pool: CanonicalPool,
+  ): Promise<Level1Snapshot | undefined> {
+    const key = this.options.secrets[this.options.config.providers.coingecko.api_key_env];
+    if (!key) throw new Error('CoinGecko secret is not configured');
+    const network = pool.chain === 'sol' ? 'solana' : 'bsc';
+    const poolUrl = `${this.options.config.providers.coingecko.rest_base_url}/onchain/networks/${network}/pools/multi/${encodeURIComponent(pool.poolAddress)}?include=base_token,quote_token&include_volume_breakdown=true&include_composition=true`;
+    assertAnalystEndpoint(poolUrl, this.options.config.providers.coingecko.rest_base_url);
+    const poolResult = await requestJson<Record<string, unknown>>(
+      poolUrl,
+      { headers: { 'x-cg-pro-api-key': key } },
+      httpOptions(this.options.config, 'coingecko', 'pools.multi.level1.confirmation'),
+    );
+    const batch = coingeckoPoolBatchRawSchema.parse(poolResult.data);
+    const poolObservedAt = Date.now();
+    const poolPayload = JSON.stringify(batch);
+    insertProviderEvent(
+      this.options.database,
+      {
+        provider: 'coingecko',
+        capability: 'pools.multi.level1',
+        chain: pool.chain,
+        tokenAddress: pool.tokenAddress,
+        poolAddress: pool.poolAddress,
+        observedAt: poolObservedAt,
+        schemaVersion: 'coingecko.pools.multi.v1',
+        payload: poolPayload,
+        billingBucket: 'pool_screening',
+        requestMeta: {
+          endpoint_name: 'onchain.pools.multi.confirmation',
+          method: 'GET',
+          status: poolResult.diagnostic.status,
+          response_bytes: Buffer.byteLength(poolPayload),
+        },
+      },
+      this.options.writeBudget,
+    );
+    const poolRaw = poolRawForAddress(batch, network, pool.poolAddress, pool.tokenAddress);
+    if (!poolRaw) return undefined;
+    const parsedPool = parsePool(poolRaw, pool.chain, pool.tokenAddress);
+    if (parsedPool.status !== 'complete' || parsedPool.pool.identityKey !== pool.identityKey)
+      return undefined;
+
+    const tradeUrl = `${this.options.config.providers.coingecko.rest_base_url}/onchain/networks/${network}/pools/${encodeURIComponent(pool.poolAddress)}/trades`;
+    assertAnalystEndpoint(tradeUrl, this.options.config.providers.coingecko.rest_base_url);
+    const tradeResult = await requestJson<Record<string, unknown>>(
+      tradeUrl,
+      { headers: { 'x-cg-pro-api-key': key } },
+      httpOptions(this.options.config, 'coingecko', 'trades.level1.confirmation'),
+    );
+    const trades = coingeckoTradesRawSchema.parse(tradeResult.data);
+    const tradeObservedAt = Date.now();
+    const tradePayload = JSON.stringify(trades);
+    insertProviderEvent(
+      this.options.database,
+      {
+        provider: 'coingecko',
+        capability: 'trades.level1',
+        chain: pool.chain,
+        tokenAddress: pool.tokenAddress,
+        poolAddress: pool.poolAddress,
+        observedAt: tradeObservedAt,
+        schemaVersion: 'coingecko.trades.v1',
+        payload: tradePayload,
+        billingBucket: 'pool_screening',
+        requestMeta: {
+          endpoint_name: 'onchain.pools.trades.confirmation',
+          method: 'GET',
+          status: tradeResult.diagnostic.status,
+          response_bytes: Buffer.byteLength(tradePayload),
+        },
+      },
+      this.options.writeBudget,
+    );
+    const observedAt = latestLevel1ObservedAt(poolObservedAt, tradeObservedAt);
+    const parsed = parseLevel1Snapshot(
+      level1RawForPool(
+        poolRaw,
+        parsedPool.pool,
+        findPoolAttributes(batch, network, pool.poolAddress),
+        observedAt,
+        latestTradeAt(trades),
+      ),
+      parsedPool.pool,
+      observedAt,
+    );
+    if (parsed.status !== 'complete') return undefined;
+    const previous =
+      this.level1Snapshots.get(pool.identityKey) ??
+      this.restorePreviousLevel1Snapshot(
+        pool.chain,
+        { token_address: pool.tokenAddress, pool_address: pool.poolAddress },
+        parsedPool.pool,
+        poolObservedAt,
+      );
+    let candidateActive = false;
+    boundedWrite(this.options.database, this.options.writeBudget, (context) => {
+      const info = this.options.database
+        .prepare(
+          `UPDATE candidates SET updated_at = ?
+           WHERE id = ? AND chain = ? AND token_address = ? AND pool_address = ?
+             AND safety_status = 'pass' AND status != 'expired'`,
+        )
+        .run(observedAt, candidateId, pool.chain, pool.tokenAddress, pool.poolAddress);
+      context.addRows(info.changes);
+      candidateActive = info.changes === 1;
+    });
+    if (!candidateActive) return undefined;
+    if (previous) this.previousLevel1Snapshots.set(pool.identityKey, previous);
+    this.level1Snapshots.set(pool.identityKey, parsed.snapshot);
+    this.level1Pools.set(`${pool.chain}:${pool.poolAddress}:${pool.tokenAddress}`, parsedPool.pool);
+    return parsed.snapshot;
   }
 
   private scheduleSignalCheck(trade: NormalizedTrade, at: number): void {

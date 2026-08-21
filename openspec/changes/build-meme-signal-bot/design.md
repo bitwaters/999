@@ -1,6 +1,6 @@
 ## Context
 
-项目当前只有开发设计基线、真实 API 契约测试、预检脚本和采样资料，尚无正式应用骨架。详细业务口径以仓库根目录 `Meme信号Bot最终开发文档.md` v3.11.0 为设计依据，以本变更的七份 capability spec 为可验收行为契约。
+项目已经具备正式应用骨架、真实 API 契约测试、预检脚本和持续 Shadow 采样资料。详细业务口径以仓库根目录 `Meme信号Bot最终开发文档.md` 为设计依据，以本变更的七份 capability spec 为可验收行为契约。
 
 系统只运行 Solana 与 BSC，外部依赖为 GMGN Agent API、CoinGecko Analyst REST/G2 和 Telegram Bot API。开发与业务配置只能在本地修改，通过 GitHub 单一 `main` 分支和 CI 后由服务器拉取部署；服务器持续积累原始样本，但不得热改代码、配置或数据库。
 
@@ -72,6 +72,8 @@ G2 callback 只固化 observed_at、校验包大小和入队。队列外完成�
 
 安全结果使用 `pass|fatal|policy_reject|incomplete`：S0 明确合约风险是 fatal；已验证并显式启用的 S1 超阈值是 policy_reject；缺失、过期、类型异常或冲突是 incomplete。只有 pass 可发起 CoinGecko 请求。确认前按 expires_at 与 config version 复核，配置升级时用 raw 重算。
 
+完整探测循环可能长于安全和 buyers freshness，因此确认阶段不依赖下一次全量轮询碰巧及时完成。只有 G2 窗口具备确认价值、独立策略门槛没有明确拒绝且阻塞来自 safety/Level 1 过期时，才对该候选执行一次去重的确认前刷新：先重新请求链独立 GMGN Token Security，pass 后再刷新单候选 CoinGecko Level 1，最后使用原 30s G2 窗口重跑同一完整确认表达式；刷新完成距窗口结束超过 30s 则按 G2 stale 放弃。仅价格基线缺失不能单独触发刷新。任一步失败或候选已过期均保持 incomplete，不放宽 freshness 或策略阈值。
+
 替代方案：在 Level 1/G2 后查安全会浪费 credits；跨链 common adapter 容易读取无意义占位字段；把 S1 命中也称 fatal 会污染风险审计和回算解释。
 
 ### 6. 以 Candidate Cycle 和年龄模式驱动唯一信号
@@ -79,6 +81,8 @@ G2 callback 只固化 observed_at、校验包大小和入队。队列外完成�
 Candidate active key 使用 chain+token，Cycle 由首次允许发现 observed_at 开始，离开全部发现集合超过 TTL 后结束。主池一经选定在 Cycle 内固定，切池必须关闭旧 Cycle。`decision_time` 在线使用当前判断观测时间，replay 使用模拟时间。
 
 Newborn/Early 根据 `coverage_seconds=max(1,decision_time-max(pool_created_at,window_start))` 计算实际覆盖，并使用 buys/buyers/volume 除以 coverage seconds 的单位时间速率、最小绝对样本和 G2 最小观察时间判断；Established 才使用完整 m5/m15/m30。Level 1 批量刷新提供 reserve、pool stability、buyers 和成交广度；Armed 才能新建 G2 订阅。
+
+Candidate 的 `status` 与 `funnel_status` 分工固定：前者表示当前生命周期，后者保存最后成功到达的漏斗阶段。TTL 过期只把 status 改为 expired，并把 discovery_ttl 写入 close_reason，不覆盖最后漏斗阶段，避免长期 Shadow 审计丢失历史进度。
 
 唯一信号表达式为 safety、pool、Attention、Conviction、Organic Growth、EntryQuality、freshness 和 evidence completeness 的确定 AND。评分只决定订阅资源优先级。锚点冷却在 Signal 创建前检查，避免创建注定不能投递的孤立 Signal。
 

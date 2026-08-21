@@ -6,6 +6,7 @@ import {
   coingeckoG2RawSchema,
   coingeckoOhlcv30sRawSchema,
   gmgnHotSearchesRawSchema,
+  gmgnSecurityRawSchema,
   gmgnTrendingRawSchema,
 } from './raw-schemas.js';
 import { CreditMeter, WeightedRequestQueue } from './queue.js';
@@ -25,6 +26,29 @@ test('parses independent GMGN capability shapes without coercing types', () => {
     'sol',
   );
   assert.throws(() => gmgnTrendingRawSchema.parse({ code: 0, data: { rank: {} } }), /array/u);
+  assert.equal(
+    gmgnSecurityRawSchema.parse({
+      address: 'token',
+      renounced_mint: true,
+      renounced_freeze_account: true,
+    }).renounced_mint,
+    true,
+  );
+  assert.equal(
+    gmgnSecurityRawSchema.parse({
+      address: '0xtoken',
+      is_honeypot: false,
+      is_renounced: true,
+      is_open_source: true,
+      buy_tax: '0.01',
+      sell_tax: '0.02',
+    }).is_renounced,
+    true,
+  );
+  assert.throws(() => gmgnSecurityRawSchema.parse([]));
+  assert.throws(() =>
+    gmgnSecurityRawSchema.parse({ code: 0, data: { renounced_mint: true } }),
+  );
 });
 
 test('validates G2 and 30-second OHLCV raw fixtures', () => {

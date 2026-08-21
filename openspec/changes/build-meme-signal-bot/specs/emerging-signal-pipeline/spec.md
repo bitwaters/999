@@ -30,7 +30,15 @@
 
 #### Scenario: buyers 快照过期
 - **WHEN** 候选满足 G2 net buy 但 Level 1 buyers 超过 freshness
-- **THEN** Conviction 为 incomplete 且不得确认
+- **THEN** Conviction 为 incomplete 且不得直接确认；若其他独立门槛没有明确拒绝，系统在安全重新通过后只刷新该候选 Level 1，并使用新快照重新执行完整确认
+
+#### Scenario: 过期证据伴随明确策略拒绝
+- **WHEN** Level 1 或 safety 已过期，同时 Attention、G2 completeness、Organic 或其他独立门槛已经明确拒绝
+- **THEN** 系统不得为该候选发起确认专用刷新，避免为注定无法确认的候选消耗供应商配额
+
+#### Scenario: 确认专用刷新跨过有效 G2 窗口
+- **WHEN** 确认专用刷新完成时间距离原 30s G2 窗口结束已经超过 30s
+- **THEN** 系统将原窗口视为 stale 且不得改用后续窗口拼接确认
 
 ### Requirement: Emerging Breakout 必须满足唯一确认表达式
 系统 SHALL 仅在 candidate freshness、safety、pool stability、Attention、Conviction、Organic Growth、EntryQuality 和 evidence completeness 全部通过时固化 `Emerging Breakout` Signal；评分只能决定调度优先级。

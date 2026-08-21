@@ -266,6 +266,8 @@ GMGN 主池只作线索。最终池必须由 CoinGecko 支持，身份、base/qu
 
 Level 1 按链分批，每请求最多 50 池，使用事件触发的 200–500ms 合并批次，加 30–60s 定时刷新。读取 reserve、composition、price change、buys/sells、unique buyers/sellers、volume、net buy、pool age、last trade、graduation/migration。通过者进入 Armed；Armed 和 confirmed-pending-anchor 期间仍参加这个批量刷新，直到 Outcome 锚点目的地投递成功或该锚点 outbox 过期。非锚点目的地的成功、失败或延迟都不改变 Level 1 生命周期。确认与每次锚点投递时 buyers/pool 快照必须不超过链独立 freshness，`buyers_freshness_seconds` 初始 Shadow 值 45s。过期或缺失为 incomplete，不得用 trade 数代替 buyer 数。
 
+若完整探测循环长于 freshness，不能简单放宽新鲜度。G2 窗口具备确认价值、Attention/G2 completeness/Organic 等独立门槛没有明确拒绝且仅被 safety/Level 1 过期阻塞时，系统对该候选执行一次按窗口去重的确认前刷新：先请求对应链 GMGN Token Security，安全重新 pass 后才刷新单候选 CoinGecko Level 1，再重跑同一完整确认表达式。仅价格基线缺失不能单独触发刷新。重算必须仍使用触发刷新的原 30s G2 窗口；刷新完成距窗口结束超过 30s 即判 G2 stale。安全失败、候选已过期、刷新失败、窗口过期或重算不通过均不得推送，也不得继续消耗后续 CoinGecko 配额。
+
 CoinGecko 交易计数为 number，但价格、成交额、reserve、balance 等大量金融数值为十进制字符串；provider adapter 必须保留原始字符串，完成格式、finite、正负、范围和单位校验后才转换为规则计算值。无法无损转换的整数使用 `BigInt` 或继续保留字符串；出现下溢、上溢或非法精度时标记 invalid，禁止隐式强转。生产不得使用无 Key GeckoTerminal 公共端点，实测连续请求会返回 429。
 
 ## 9. Level 2：G2 与 30s 数据

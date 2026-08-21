@@ -8,12 +8,31 @@ import {
   g2ProbeState,
   latestLevel1ObservedAt,
   level1ProbeState,
+  isConfirmationWindowUsable,
+  refreshConfirmationEvidence,
   selectArmCandidateRows,
   selectLevel1CandidateRows,
   selectPoolResolutionRows,
+  shouldRefreshConfirmationEvidence,
+  sameChainAddress,
   shouldRearmG2Candidate,
 } from './provider-probe.js';
 import { openDatabase } from '../persistence/db.js';
+import type { SafetyResult } from '../domain/safety.js';
+import type { Level1Snapshot } from '../market-data/level1.js';
+
+test('security refresh address matching is chain-specific', () => {
+  assert.equal(sameChainAddress('bsc', '0xABC', '0xabc'), true);
+  assert.equal(sameChainAddress('sol', 'AbC', 'abc'), false);
+  assert.equal(sameChainAddress('sol', 'AbC', 'AbC'), true);
+});
+
+test('confirmation refresh reuses only the just-closed G2 window', () => {
+  assert.equal(isConfirmationWindowUsable(60_100, 60_000), true);
+  assert.equal(isConfirmationWindowUsable(90_000, 60_000), true);
+  assert.equal(isConfirmationWindowUsable(90_001, 60_000), false);
+  assert.equal(isConfirmationWindowUsable(59_999, 60_000), false);
+});
 
 test('Level 1 evidence observedAt covers the later pool and trades responses', () => {
   assert.equal(latestLevel1ObservedAt(1_000, 1_250), 1_250);
@@ -33,6 +52,76 @@ test('Level 1 provider health tolerates candidate-local gaps but fails when none
   assert.equal(level1ProbeState(50, 43), 'ok');
   assert.equal(level1ProbeState(50, 0), 'failed');
   assert.throws(() => level1ProbeState(1, 2), /Invalid Level 1 probe counts/);
+});
+
+test('confirmation refresh only runs for refreshable evidence gaps', () => {
+  assert.equal(
+    shouldRefreshConfirmationEvidence(['level1:stale', 'conviction:incomplete']),
+    true,
+  );
+  assert.equal(
+    shouldRefreshConfirmationEvidence([
+      'safety:not_fresh_or_config_mismatch',
+      'entryQuality:rejected',
+    ]),
+    false,
+  );
+  assert.equal(
+    shouldRefreshConfirmationEvidence(['level1:stale', 'attention:rejected']),
+    false,
+  );
+  assert.equal(
+    shouldRefreshConfirmationEvidence(['level1:stale', 'entryQuality:rejected']),
+    false,
+  );
+  assert.equal(shouldRefreshConfirmationEvidence(['level1:stale', 'age:rejected:no_data']), false);
+  assert.equal(
+    shouldRefreshConfirmationEvidence(['level1:stale', 'g2:zero', 'evidence:incomplete']),
+    false,
+  );
+  assert.equal(
+    shouldRefreshConfirmationEvidence(['entry_quality:missing_price_baseline']),
+    false,
+  );
+});
+
+test('confirmation refresh validates safety before spending CoinGecko work', async () => {
+  let level1Calls = 0;
+  const order: string[] = [];
+  const blocked = await refreshConfirmationEvidence({
+    now: () => 200,
+    configVersionId: '1',
+    refreshSafety: async () => {
+      order.push('safety');
+      return safetyAt('fatal', 200, 260);
+    },
+    refreshLevel1: async () => {
+      order.push('level1');
+      level1Calls += 1;
+      return {} as Level1Snapshot;
+    },
+  });
+  assert.equal(blocked.status, 'blocked');
+  assert.equal(level1Calls, 0);
+  assert.deepEqual(order, ['safety']);
+
+  const level1 = { observedAt: 205 } as Level1Snapshot;
+  const refreshed = await refreshConfirmationEvidence({
+    now: () => 205,
+    configVersionId: '1',
+    refreshSafety: async () => {
+      order.push('safety');
+      return safetyAt('pass', 200, 260);
+    },
+    refreshLevel1: async () => {
+      order.push('level1');
+      level1Calls += 1;
+      return level1;
+    },
+  });
+  assert.equal(refreshed.status, 'complete');
+  assert.equal(level1Calls, 1);
+  assert.deepEqual(order, ['safety', 'safety', 'level1']);
 });
 
 test('G2 re-arms persisted candidates after a process restart', () => {
@@ -183,7 +272,7 @@ test('persisted stale cycles expire without terminating anchor lifecycle rows', 
       .prepare('SELECT token_address, status, funnel_status FROM candidates ORDER BY id')
       .all(),
     [
-      { token_address: 'stale-armed', status: 'expired', funnel_status: 'expired' },
+      { token_address: 'stale-armed', status: 'expired', funnel_status: 'armed' },
       {
         token_address: 'pending-anchor',
         status: 'confirmed-pending-anchor',
@@ -194,6 +283,22 @@ test('persisted stale cycles expire without terminating anchor lifecycle rows', 
   );
   database.close();
 });
+
+function safetyAt(
+  status: SafetyResult['status'],
+  checkedAt: number,
+  expiresAt: number,
+): SafetyResult {
+  return {
+    status,
+    reasons: status === 'pass' ? [] : ['fatal:test'],
+    checkedAt,
+    expiresAt,
+    providerEventId: '1',
+    configVersionId: '1',
+    canonical: {},
+  };
+}
 
 test('pool resolution selects only fresh current cycles per chain', () => {
   const database = openDatabase(':memory:');

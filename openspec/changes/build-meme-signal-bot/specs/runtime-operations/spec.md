@@ -39,6 +39,13 @@
 - **WHEN** 剩余空间低于配置安全水位
 - **THEN** 系统停止新 Candidate/G2，优先完成必要 Outcome/outbox 并暴露健康告警
 
+### Requirement: 候选过期不得抹除最后漏斗阶段
+系统 SHALL 使用 candidate status 表示生命周期已经 expired，并保留 funnel_status 为过期前最后成功到达的阶段；过期原因写入 close_reason，不得把历史阶段覆盖为笼统的 expired。
+
+#### Scenario: Armed 候选因 discovery TTL 过期
+- **WHEN** 候选在 Armed 阶段离开发现集合并超过 TTL
+- **THEN** status 变为 expired、close_reason 记录 discovery_ttl，funnel_status 仍为 armed
+
 ### Requirement: 服务器不得成为开发环境
 系统 SHALL 只允许服务器执行 clean main 的 ff-only pull、Docker Compose 构建/重启、健康诊断、备份、样本导出和版本化 replay/report wrapper；不得直接修改代码、bot.yaml、migration、Compose 或数据库。
 

@@ -50,6 +50,30 @@ test('replay extraction isolates malformed provider token addresses', () => {
   assert.deepEqual(extracted.evidence.map((item) => item.tokenAddress), ['0xabc']);
 });
 
+test('replay extraction includes targeted GMGN token security refreshes', () => {
+  const payload = { address: '0xABC', is_honeypot: false };
+  const result = extractReplayProviderEvent(
+    {
+      provider: 'gmgn',
+      capability: 'token.security',
+      chain: 'bsc',
+      token_address: '0xABC',
+      observed_at: 1_500,
+    },
+    payload,
+  );
+  assert.deepEqual(result.discovery, []);
+  assert.deepEqual(result.evidence, [
+    {
+      kind: 'safety',
+      chain: 'bsc',
+      tokenAddress: '0xabc',
+      observedAt: 1_500,
+      payload,
+    },
+  ]);
+});
+
 test('replay extraction distinguishes token pool, Level 1, G2, trades and OHLCV raw events', () => {
   const capabilities = [
     ['tokens.multi', 'pool'],

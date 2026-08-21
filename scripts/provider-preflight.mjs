@@ -79,7 +79,9 @@ function skip(name, reason) {
   console.log(`SKIP  ${name} — ${reason}`);
 }
 
+let failureCount = 0;
 function fail(name, error, secrets = []) {
+  failureCount += 1;
   console.error(`FAIL  ${name} — ${redactSecrets(error.message, secrets)}`);
 }
 
@@ -240,3 +242,7 @@ console.log('供应商开发前预检（不会输出 Token，也不会发送 Tel
 await checkGmgn(values.GMGN_API_KEY);
 await checkCoinGecko(values.COINGECKO_PRO_API_KEY);
 await checkTelegram(values.TELEGRAM_BOT_TOKEN, values);
+if (failureCount > 0) {
+  console.error(`供应商预检失败项：${failureCount}`);
+  process.exitCode = 1;
+}

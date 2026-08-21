@@ -166,3 +166,4 @@ const output = {
 await mkdir(resultDirectory, { recursive: true });
 await writeFile(resultPath, `${JSON.stringify(output, null, 2)}\n`);
 console.log(JSON.stringify(output, null, 2));
+if (results.some((result) => !result.ok)) process.exitCode = 1;

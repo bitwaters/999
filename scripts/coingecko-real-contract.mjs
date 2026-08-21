@@ -310,6 +310,8 @@ await writeFile(
   )}\n`,
 );
 
+const failedCount = results.filter((item) => !item.ok).length;
 console.log(
-  `DONE total=${results.length} passed=${results.filter((item) => item.ok).length} failed=${results.filter((item) => !item.ok).length} rest_credit_delta=${creditDelta}`,
+  `DONE total=${results.length} passed=${results.length - failedCount} failed=${failedCount} rest_credit_delta=${creditDelta}`,
 );
+if (failedCount > 0) process.exitCode = 1;

@@ -101,7 +101,7 @@ if (!apiKey) throw new Error("缺少 GMGN_API_KEY");
 
 const samples = {};
 for (const chain of ["sol", "bsc"]) {
-  for (const interval of ["1m", "5m", "30m", "1h", "3h", "6h", "24h"]) {
+  for (const interval of ["1m", "5m", "1h", "6h", "24h"]) {
     const json = await test(`trending.${chain}.${interval}`, ["market", "trending", "--chain", chain, "--interval", interval, "--limit", "3"], apiKey);
     const address = json?.data?.rank?.[0]?.address;
     if (!samples[chain] && address) samples[chain] = address;

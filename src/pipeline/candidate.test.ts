@@ -86,6 +86,28 @@ test('Candidate Cycle closes after discovery TTL and then starts a new cycle', (
   assert.equal(next.cycle.cycleStartedAt, 12_000);
 });
 
+test('Candidate Cycle restores a persisted active cycle after restart', () => {
+  const tracker = new CandidateCycleTracker(900);
+  tracker.restore({
+    chain: 'bsc',
+    tokenAddress: 'token',
+    cycleStartedAt: 1_000,
+    firstSeenAt: 1_000,
+    lastSeenAt: 2_000,
+    status: 'armed',
+  });
+  const result = tracker.ingest({
+    chain: 'bsc',
+    tokenAddress: 'token',
+    source: 'trending_1m',
+    observedAt: 3_000,
+    rank: 1,
+  });
+  assert.equal(result.startedNewCycle, false);
+  assert.equal(result.cycle.cycleStartedAt, 1_000);
+  assert.equal(result.cycle.status, 'armed');
+});
+
 test('cheap prefilter is safety-first and unresolved pools receive bounded backoff', () => {
   const base = {
     chain: 'sol' as const,

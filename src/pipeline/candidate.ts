@@ -54,6 +54,24 @@ export class CandidateCycleTracker {
       throw new Error('Candidate TTL must be a positive integer');
   }
 
+  restore(cycle: Pick<CandidateCycle, 'chain' | 'tokenAddress' | 'cycleStartedAt' | 'firstSeenAt' | 'lastSeenAt' | 'status'>): void {
+    if (
+      !Number.isSafeInteger(cycle.cycleStartedAt) ||
+      !Number.isSafeInteger(cycle.firstSeenAt) ||
+      !Number.isSafeInteger(cycle.lastSeenAt) ||
+      cycle.cycleStartedAt < 0 ||
+      cycle.firstSeenAt < 0 ||
+      cycle.lastSeenAt < 0 ||
+      cycle.firstSeenAt < cycle.cycleStartedAt ||
+      cycle.lastSeenAt < cycle.firstSeenAt
+    )
+      throw new Error('Invalid persisted candidate cycle');
+    const key = `${cycle.chain}:${cycle.tokenAddress}`;
+    if (this.cycles.has(key)) return;
+    this.cycles.set(key, { ...cycle, key, evidence: [] });
+    this.sourceStates.set(key, new Map());
+  }
+
   ingest(observation: DiscoveryObservation): CandidateIngestResult {
     validateObservation(observation);
     const key = `${observation.chain}:${observation.tokenAddress}`;

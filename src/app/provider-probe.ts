@@ -19,6 +19,7 @@ import {
 import {
   CandidateCycleTracker,
   unresolvedRetryAt,
+  type CandidateCycle,
   type DiscoveryObservation,
 } from '../pipeline/candidate.js';
 import { readDiskHealth } from '../runtime/health.js';
@@ -517,6 +518,37 @@ export class ProviderProbe {
   ): void {
     if (!observation.tokenAddress) return;
     try {
+      const persisted = this.options.database
+        .prepare(
+          `SELECT cycle_started_at, first_seen_at, last_seen_at, status
+           FROM candidates
+           WHERE chain = ? AND token_address = ? AND status != 'expired'
+             AND last_seen_at >= ?
+           ORDER BY cycle_started_at DESC LIMIT 1`,
+        )
+        .get(
+          observation.chain,
+          observation.tokenAddress,
+          observation.observedAt -
+            this.options.config.chains[observation.chain].discovery.candidate_ttl_seconds *
+              1000,
+        ) as
+        | {
+            cycle_started_at: number;
+            first_seen_at: number;
+            last_seen_at: number;
+            status: CandidateCycle['status'];
+          }
+        | undefined;
+      if (persisted)
+        this.trackers[observation.chain].restore({
+          chain: observation.chain,
+          tokenAddress: observation.tokenAddress,
+          cycleStartedAt: persisted.cycle_started_at,
+          firstSeenAt: persisted.first_seen_at,
+          lastSeenAt: persisted.last_seen_at,
+          status: persisted.status,
+        });
       const result = this.trackers[observation.chain].ingest(observation);
       const cycle = result.cycle;
       const safety = this.evaluateSafety(

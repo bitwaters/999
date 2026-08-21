@@ -9,7 +9,7 @@ services:
     environment:
       CONTAINERIZED_RUN: ${CONTAINERIZED_RUN:-0}
       BUILD_GIT_COMMIT: ${BUILD_GIT_COMMIT:-unknown}
-      BUILD_WORKTREE_STATUS: ${BUILD_WORKTREE_STATUS:-unknown}
+      BUILD_WORKTREE_STATUS: ${BUILD_WORKTREE_STATUS-unknown}
       RUNTIME_HEALTH_REQUIRED: '1'
     command: ['node', 'dist/app/main.js']
     volumes:

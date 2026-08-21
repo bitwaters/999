@@ -108,6 +108,8 @@ export async function loadConfig(
 }
 
 export function readGitCommit(cwd = process.cwd()): string {
+  const injected = process.env.BUILD_GIT_COMMIT?.trim();
+  if (/^[a-f0-9]{7,64}$/u.test(injected ?? '')) return injected!;
   try {
     return (
       execFileSync('git', ['-C', cwd, 'rev-parse', 'HEAD'], {

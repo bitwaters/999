@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import YAML from 'yaml';
-import { parseConfigText, requireSecretEnv } from './load.js';
+import { parseConfigText, readGitCommit, requireSecretEnv } from './load.js';
 
 const template = await readFile(new URL('../../config/bot.yaml', import.meta.url), 'utf8');
 
@@ -17,6 +17,17 @@ test('accepts the complete Shadow configuration', () => {
   assert.equal(loaded.config.delivery.outcome_anchor_destination, 'admin_private');
   assert.equal(loaded.config.providers.coingecko.max_pools_per_batch, 50);
   assert.match(loaded.configHash, /^[a-f0-9]{64}$/u);
+});
+
+test('uses the injected build commit when container metadata has no Git checkout', () => {
+  const previous = process.env.BUILD_GIT_COMMIT;
+  process.env.BUILD_GIT_COMMIT = '0123456789abcdef0123456789abcdef01234567';
+  try {
+    assert.equal(readGitCommit('/path/without/a/git/checkout'), process.env.BUILD_GIT_COMMIT);
+  } finally {
+    if (previous === undefined) delete process.env.BUILD_GIT_COMMIT;
+    else process.env.BUILD_GIT_COMMIT = previous;
+  }
 });
 
 test('rejects unknown keys instead of silently dropping them', () => {

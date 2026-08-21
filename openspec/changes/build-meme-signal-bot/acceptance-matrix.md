@@ -14,7 +14,7 @@
 
 ## 真实供应商结果
 
-- GMGN 预检：SOL/BSC trending 1m/5m、hot-searches 通过；修正 interval 与 1000ms pacing 后深测 52/52 通过。最新受控负载探针以 2 路并发和 5.2 秒间隔各链交替 4 次，共 6/6 通过，未观察到 reset/429/封禁；此前观察到真实 rate-limit ban，因此未执行会主动扩大封禁风险的压力测试，RPM 上限和 reset 边界仍未证实。
+- GMGN 预检：SOL/BSC trending 1m/5m、hot-searches 通过；修正 interval 与 1000ms pacing 后深测 52/52 通过。最新有界边界探针以 4 路并发、随后 1 秒 pacing 交替请求 10 次，共 14/14 通过，未观察到 reset/429/封禁；此前观察到真实 rate-limit ban，因此未主动扩大压力，服务端 reset/封禁边界仍未证实。
 - CoinGecko 深测：本次重跑 34/34 通过，覆盖 50 池批量、50 token 批量、REST trades、30 秒 base/quote OHLCV、G2/G3 WebSocket、SOL/BSC 和 credits 计数；REST credit delta=29。合同脚本按池列表 m5 活跃度选取 WebSocket 测试池，避免把无事件的列表首池误判为协议失败。
 - Telegram 只读预检：GMGN/CoinGecko 通过；Telegram `getMe` 因到 Telegram IP 的 `ETIMEDOUT/EHOSTUNREACH` 失败，未发送消息；此前成功记录仍显示 admin private/group 通过、配置 channel 为 `chat not found`。
 - Docker smoke：当前提交镜像 `999-app:acceptance` 重建成功，容器 healthcheck 输出 healthy，SQLite schemaVersion=1；宿主机 healthcheck 因磁盘高水位而诚实失败；dirty deploy guard 在未提交工作树下于 `git pull` 前以 exit=1 拒绝。Compose 仍包含长期 app、Telegram outbox worker 与带健康检查的原始 Shadow sampler；本次结果证明容器可构建和健康检查通过，但不等同于真实 provider 长期运行或服务器部署。

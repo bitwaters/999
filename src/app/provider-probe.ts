@@ -1357,14 +1357,19 @@ export class ProviderProbe {
   }
 
   private tryCreateLiveSignal(trade: NormalizedTrade): void {
+    const cycle = this.trackers[trade.chain].get(trade.chain, trade.tokenAddress);
+    if (!cycle) {
+      this.logSignalBlocked(trade, ['cycle:missing']);
+      return;
+    }
     const candidate = this.options.database
       .prepare(
         `SELECT id, cycle_started_at, safety_json FROM candidates
          WHERE chain = ? AND token_address = ? AND pool_address = ?
-           AND status = 'armed' AND safety_status = 'pass'
+           AND cycle_started_at = ? AND status = 'armed' AND safety_status = 'pass'
          ORDER BY updated_at DESC LIMIT 1`,
       )
-      .get(trade.chain, trade.tokenAddress, trade.poolAddress) as
+      .get(trade.chain, trade.tokenAddress, trade.poolAddress, cycle.cycleStartedAt) as
       { id: number; cycle_started_at: number; safety_json: string | null } | undefined;
     if (!candidate) {
       this.logSignalBlocked(trade, ['candidate:not_armed']);
@@ -1374,17 +1379,12 @@ export class ProviderProbe {
       this.logSignalBlocked(trade, ['candidate:missing_safety']);
       return;
     }
-    const cycle = this.trackers[trade.chain].get(trade.chain, trade.tokenAddress);
     const pool = [...this.level1Pools.values()].find(
       (item) =>
         item.chain === trade.chain &&
         item.tokenAddress === trade.tokenAddress &&
         item.poolAddress === trade.poolAddress,
     );
-    if (!cycle) {
-      this.logSignalBlocked(trade, ['cycle:missing']);
-      return;
-    }
     if (!pool) {
       this.logSignalBlocked(trade, ['pool:missing']);
       return;

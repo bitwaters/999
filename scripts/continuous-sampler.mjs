@@ -182,6 +182,10 @@ function asText(value) {
   return value === null || value === undefined ? null : String(value);
 }
 
+function addressKey(chain, address) {
+  return chain === 'bsc' && typeof address === 'string' ? address.toLowerCase() : address;
+}
+
 function safeError(value, limit = 500) {
   return redactSecrets(value, [gmgnKey, cgKey]).slice(0, limit);
 }
@@ -444,12 +448,14 @@ async function collectIndexing() {
       () =>
         cg(`/onchain/networks/${network}/tokens/multi/${addresses.join(',')}?include=top_pools`),
     );
-    const tokenMap = new Map((json?.data || []).map((item) => [item.attributes?.address, item]));
+    const tokenMap = new Map(
+      (json?.data || []).map((item) => [addressKey(chain, item.attributes?.address), item]),
+    );
     const includedMap = new Map(
       (json?.included || []).filter((item) => item.type === 'pool').map((item) => [item.id, item]),
     );
     for (const candidate of candidates) {
-      const token = tokenMap.get(candidate.token_address);
+      const token = tokenMap.get(addressKey(chain, candidate.token_address));
       const poolId = token?.relationships?.top_pools?.data?.[0]?.id;
       const pool = includedMap.get(poolId);
       const poolAddress =

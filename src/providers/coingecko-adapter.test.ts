@@ -123,3 +123,44 @@ test('maps pool snapshots and trades to a fresh Level 1 raw record', () => {
   assert.equal(level1.buyers, 5);
   assert.equal(level1.net_buy_usd, '12.25');
 });
+
+test('matches BSC token and pool addresses without depending on checksum casing', () => {
+  const bscToken = '0xabcdef0123456789012345678901234567890123';
+  const bscPool = '0x1234567890abcdef1234567890abcdef12345678';
+  const mixedCase = (address: string) => `0x${address.slice(2).toUpperCase()}`;
+  const response = {
+    data: [
+      {
+        type: 'token',
+        attributes: { address: mixedCase(bscToken) },
+        relationships: {
+          top_pools: { data: [{ id: `bsc_${bscPool}`, type: 'pool' }] },
+        },
+      },
+    ],
+    included: [
+      {
+        type: 'pool',
+        id: `bsc_${bscPool}`,
+        attributes: {
+          address: mixedCase(bscPool),
+          reserve_in_usd: '1000',
+          pool_created_at: '2026-08-21T00:00:00Z',
+          volume_usd: { h24: '250' },
+          transactions: { h24: { buys: 4, sells: 3 } },
+        },
+        relationships: {
+          base_token: { data: { id: `bsc_${mixedCase(bscToken)}` } },
+          quote_token: {
+            data: { id: 'bsc_0x0000000000000000000000000000000000000001' },
+          },
+        },
+      },
+    ],
+  };
+  const raws = poolRawsForToken(response, 'bsc', bscToken);
+  assert.equal(raws.length, 1);
+  const parsed = parsePool(raws[0]!, 'bsc', bscToken);
+  assert.equal(parsed.status, 'complete');
+  if (parsed.status === 'complete') assert.equal(parsed.pool.targetSide, 'base');
+});

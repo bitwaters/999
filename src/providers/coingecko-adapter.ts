@@ -90,9 +90,10 @@ export function poolRawsForToken(
   network: 'solana' | 'bsc',
   tokenAddress: string,
 ): RawPool[] {
-  const token = (Array.isArray(response.data) ? response.data : []).find(
-    (item) => tokenAddressFromCoinGeckoItem(asRecord(item)) === tokenAddress,
-  );
+  const token = (Array.isArray(response.data) ? response.data : []).find((item) => {
+    const address = tokenAddressFromCoinGeckoItem(asRecord(item));
+    return address !== undefined && sameAddress(network, address, tokenAddress);
+  });
   if (!token) return [];
 
   const relationships = asRecord(asRecord(token).relationships);

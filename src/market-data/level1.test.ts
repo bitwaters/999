@@ -116,3 +116,24 @@ test('unstable or stale Level 1 cannot arm, and anchor lifecycle controls refres
   });
   assert.equal(transitionLevel1State('armed', unstable, 10_000, 45).state, 'incomplete');
 });
+
+test('BSC Level 1 identity matching is case-insensitive', () => {
+  const bscPool: CanonicalPool = {
+    ...pool,
+    chain: 'bsc',
+    poolAddress: '0xabcdef0123456789012345678901234567890123',
+    tokenAddress: '0x1234567890abcdef1234567890abcdef12345678',
+    identityKey:
+      'bsc:0xabcdef0123456789012345678901234567890123:0x1234567890abcdef1234567890abcdef12345678',
+  };
+  const parsed = parseLevel1Snapshot(
+    {
+      ...raw(),
+      pool_address: bscPool.poolAddress.toUpperCase(),
+      token_address: bscPool.tokenAddress.toUpperCase(),
+    },
+    bscPool,
+    10_000,
+  );
+  assert.equal(parsed.status, 'complete');
+});

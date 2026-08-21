@@ -43,15 +43,22 @@ export function parsePool(
     const baseTokenAddress = requiredAddress(raw, 'base_token_address');
     const quoteTokenAddress = requiredAddress(raw, 'quote_token_address');
     parseAddress(tokenAddress);
-    if (baseTokenAddress === quoteTokenAddress) reasons.push('identity:base_quote_same');
-    if (tokenAddress !== baseTokenAddress && tokenAddress !== quoteTokenAddress)
+    if (sameAddress(chain, baseTokenAddress, quoteTokenAddress))
+      reasons.push('identity:base_quote_same');
+    if (
+      !sameAddress(chain, tokenAddress, baseTokenAddress) &&
+      !sameAddress(chain, tokenAddress, quoteTokenAddress)
+    )
       reasons.push('identity:token_not_in_pool');
-    const targetSide: PoolTargetSide | undefined =
-      tokenAddress === baseTokenAddress
-        ? 'base'
-        : tokenAddress === quoteTokenAddress
-          ? 'quote'
-          : undefined;
+    const targetSide: PoolTargetSide | undefined = sameAddress(
+      chain,
+      tokenAddress,
+      baseTokenAddress,
+    )
+      ? 'base'
+      : sameAddress(chain, tokenAddress, quoteTokenAddress)
+        ? 'quote'
+        : undefined;
     const reserveUsd = requiredDecimal(raw, 'reserve_usd', reasons);
     const volumeUsd24h = optionalDecimal(raw, 'volume_usd_24h', reasons) ?? '0';
     const trades24h = optionalInteger(raw, 'trades_24h', reasons) ?? 0;
@@ -118,6 +125,10 @@ export function selectPrimaryPool(pools: readonly CanonicalPool[]): PoolSelectio
 function requiredAddress(raw: RawPool, field: string): string {
   const value = raw[field];
   return parseAddress(value);
+}
+
+function sameAddress(chain: CanonicalPool['chain'], left: string, right: string): boolean {
+  return chain === 'bsc' ? left.toLowerCase() === right.toLowerCase() : left === right;
 }
 
 function requiredDecimal(raw: RawPool, field: string, reasons: string[]): string | undefined {

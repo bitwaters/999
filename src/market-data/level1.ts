@@ -40,8 +40,10 @@ export function parseLevel1Snapshot(
   try {
     const poolAddress = requiredAddress(raw, 'pool_address');
     const tokenAddress = requiredAddress(raw, 'token_address');
-    if (poolAddress !== pool.poolAddress) reasons.push('identity:pool_address');
-    if (tokenAddress !== pool.tokenAddress) reasons.push('identity:token_address');
+    if (!sameAddress(pool.chain, poolAddress, pool.poolAddress))
+      reasons.push('identity:pool_address');
+    if (!sameAddress(pool.chain, tokenAddress, pool.tokenAddress))
+      reasons.push('identity:token_address');
     const poolStatus = requiredPoolStatus(raw.pool_status, reasons);
     const reserveUsd = requiredDecimal(raw, 'reserve_usd', reasons);
     const priceUsd = requiredDecimal(raw, 'price_usd', reasons);
@@ -241,6 +243,10 @@ export function isAnchorCooldownActive(until: number | undefined, now: number): 
 
 function requiredAddress(raw: RawLevel1, field: string): string {
   return parseAddress(raw[field]);
+}
+
+function sameAddress(chain: CanonicalPool['chain'], left: string, right: string): boolean {
+  return chain === 'bsc' ? left.toLowerCase() === right.toLowerCase() : left === right;
 }
 
 function requiredDecimal(raw: RawLevel1, field: string, reasons: string[]): string | undefined {

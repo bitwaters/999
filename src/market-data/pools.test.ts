@@ -41,3 +41,29 @@ test('pool parser rejects type drift and primary selection is deterministic', ()
   if (selected.status === 'resolved') assert.equal(selected.pool.poolAddress, 'pool-a');
   assert.equal(selectPrimaryPool([]).status, 'unresolved');
 });
+
+test('BSC pool identity matching is case-insensitive', () => {
+  const result = parsePool(
+    {
+      ...raw('0xabcdef0123456789012345678901234567890123', '100'),
+      base_token_address: '0xABCDEF0123456789012345678901234567890123',
+      quote_token_address: '0x0000000000000000000000000000000000000001',
+    },
+    'bsc',
+    '0xabcdef0123456789012345678901234567890123',
+  );
+  assert.equal(result.status, 'complete');
+  if (result.status === 'complete') assert.equal(result.pool.targetSide, 'base');
+  assert.equal(
+    parsePool(
+      {
+        ...raw('0xabcdef0123456789012345678901234567890123', '100'),
+        base_token_address: '0xABCDEF0123456789012345678901234567890123',
+        quote_token_address: '0xabcdef0123456789012345678901234567890123',
+      },
+      'bsc',
+      '0xabcdef0123456789012345678901234567890123',
+    ).status,
+    'invalid',
+  );
+});

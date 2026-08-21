@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { redactSecrets } from './redact.mjs';
+import { sanitizeGmgnFixture } from './gmgn-fixture.mjs';
 
 const root = new URL('../', import.meta.url);
 const resultDir = new URL('../preflight-results/', import.meta.url);
@@ -130,22 +131,12 @@ if (!apiKey) throw new Error('缺少 GMGN_API_KEY');
 
 const fixtureDir = process.env.GMGN_FIXTURE_DIR ? path.resolve(process.env.GMGN_FIXTURE_DIR) : null;
 
-function sanitizeFixture(value) {
-  if (Array.isArray(value)) return value.map((item) => sanitizeFixture(item));
-  if (!value || typeof value !== 'object') return redactSecrets(value, [apiKey]);
-  return Object.fromEntries(
-    Object.entries(value)
-      .filter(([key]) => !/^(authorization|api[_-]?key|access[_-]?token|headers)$/iu.test(key))
-      .map(([key, item]) => [key, sanitizeFixture(item)]),
-  );
-}
-
 async function writeFixture(name, value) {
   if (!fixtureDir || value === null || value === undefined) return;
   await mkdir(fixtureDir, { recursive: true });
   await writeFile(
     path.join(fixtureDir, name),
-    `${JSON.stringify(sanitizeFixture(value), null, 2)}\n`,
+    `${JSON.stringify(sanitizeGmgnFixture(value, [apiKey]), null, 2)}\n`,
   );
 }
 

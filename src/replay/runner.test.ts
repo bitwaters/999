@@ -6,7 +6,7 @@ import path from 'node:path';
 import { openDatabase } from '../persistence/db.js';
 import { cleanupReplayTemporary, createReplayBackup } from './backup.js';
 import { loadReplayConfig } from './config.js';
-import { runReplay } from './runner.js';
+import { failReplayRun, runReplay, startReplayRun } from './runner.js';
 import { buildSimulatedCandidates, evidenceVisibleAt, rebuildCandidateCycles } from './timeline.js';
 import type { DiscoveryObservation } from '../pipeline/candidate.js';
 
@@ -109,13 +109,14 @@ test('replay writes only replay tables and marks missing G2 unavailable', () => 
     dataCutoffAt: 30_000,
     now: 31_000,
     startedAt: 30_000,
-    deliveryDelayMs: 500,
-    candidateTtlSeconds: 30,
-    outcomeMaxLatenessSeconds: 5,
-    horizonSeconds: [60],
-    discovery,
-    evidence: [
-      { kind: 'safety', observedAt: 20_100, tokenAddress: discovery[0]!.tokenAddress, payload: {} },
+    simulatedResults: [
+      {
+        key: 'sol:token:1',
+        sourceLiveCandidateIds: [],
+        simulatedSignal: { status: 'unavailable' },
+        outcome: { status: 'unavailable' },
+        completenessStatus: 'unavailable',
+      },
     ],
     resultBatchSize: 1,
     worktreeStatus: '',
@@ -143,12 +144,15 @@ test('replay pauses for live backlog and records failed runs for recovery', () =
     dataCutoffAt: 30_000,
     now: 31_000,
     startedAt: 30_000,
-    deliveryDelayMs: 0,
-    candidateTtlSeconds: 30,
-    outcomeMaxLatenessSeconds: 5,
-    horizonSeconds: [60],
-    discovery,
-    evidence: [],
+    simulatedResults: [
+      {
+        key: 'sol:token:1',
+        sourceLiveCandidateIds: [],
+        simulatedSignal: { status: 'blocked' },
+        outcome: { status: 'unavailable' },
+        completenessStatus: 'partial' as const,
+      },
+    ],
     resultBatchSize: 1,
     worktreeStatus: '',
   };
@@ -192,5 +196,59 @@ test('replay creates a consistent SQLite backup with bounded page progress', asy
   assert.ok(progress.length > 0);
   cleanupReplayTemporary(directory, 7);
   rmSync(directory, { recursive: true, force: true });
+  database.close();
+});
+
+test('prepared replay runs retain failures that happen before simulation writes', () => {
+  const database = openDatabase(':memory:');
+  database
+    .prepare(
+      `INSERT INTO rule_config_versions (config_hash, git_commit, run_mode, yaml_snapshot, created_at)
+       VALUES ('hash', 'commit', 'shadow', 'yaml', 1)`,
+    )
+    .run();
+  const runId = startReplayRun({
+    database,
+    configVersionId: 1,
+    gitCommit: 'commit',
+    runMode: 'shadow',
+    dataStartAt: 1,
+    dataEndAt: 2,
+    dataCutoffAt: 2,
+    startedAt: 3,
+  });
+  failReplayRun(database, runId, new Error('snapshot failed'), 4);
+  assert.deepEqual(
+    database
+      .prepare('SELECT status, error_message, completed_at FROM replay_runs WHERE id = ?')
+      .get(runId),
+    { status: 'failed', error_message: 'snapshot failed', completed_at: 4 },
+  );
+  database.close();
+});
+
+test('invalid prepared replay metadata is rejected before a run row is created', () => {
+  const database = openDatabase(':memory:');
+  database
+    .prepare(
+      `INSERT INTO rule_config_versions (config_hash, git_commit, run_mode, yaml_snapshot, created_at)
+       VALUES ('hash', 'commit', 'shadow', 'yaml', 1)`,
+    )
+    .run();
+  assert.throws(
+    () =>
+      startReplayRun({
+        database,
+        configVersionId: 1,
+        gitCommit: 'commit',
+        runMode: 'shadow',
+        dataStartAt: 3,
+        dataEndAt: 2,
+        dataCutoffAt: 3,
+        startedAt: 4,
+      }),
+    /start is after data end/,
+  );
+  assert.equal(database.prepare('SELECT COUNT(*) FROM replay_runs').pluck().get(), 0);
   database.close();
 });

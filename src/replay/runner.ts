@@ -1,7 +1,6 @@
 import type { SqliteDatabase } from '../persistence/db.js';
 import { assertCleanReplayWorktree } from './config.js';
-import { buildSimulatedCandidates, type ReplayEvidence } from './timeline.js';
-import type { DiscoveryObservation } from '../pipeline/candidate.js';
+import type { SimulatedReplayResult } from './simulator.js';
 
 export type ReplayRunStatus = 'running' | 'complete' | 'partial' | 'paused' | 'failed';
 
@@ -15,16 +14,12 @@ export type ReplayRunInput = {
   dataCutoffAt: number;
   now: number;
   startedAt: number;
-  deliveryDelayMs: number;
-  candidateTtlSeconds: number;
-  outcomeMaxLatenessSeconds: number;
-  horizonSeconds: readonly number[];
-  discovery: readonly DiscoveryObservation[];
-  evidence: readonly ReplayEvidence[];
+  simulatedResults: readonly SimulatedReplayResult[];
   resultBatchSize: number;
   worktreeStatus?: string;
   gitCwd?: string;
   shouldYield?: () => boolean;
+  runId?: number;
 };
 
 export type ReplayRunResult = {
@@ -36,19 +31,22 @@ export type ReplayRunResult = {
   unavailableCount: number;
 };
 
-export function runReplay(input: ReplayRunInput): ReplayRunResult {
-  assertCleanReplayWorktree(input.worktreeStatus, input.gitCwd);
-  validateInput(input);
-  const config = input.database
-    .prepare(
-      'SELECT git_commit AS gitCommit, run_mode AS runMode FROM rule_config_versions WHERE id = ?',
-    )
-    .get(input.configVersionId) as { gitCommit: string; runMode: string } | undefined;
-  if (!config) throw new Error(`Unknown replay config version: ${input.configVersionId}`);
-  if (config.gitCommit !== input.gitCommit || config.runMode !== input.runMode)
-    throw new Error('Replay config version does not match Git commit or run mode');
+export type ReplayRunMetadata = Pick<
+  ReplayRunInput,
+  | 'database'
+  | 'configVersionId'
+  | 'gitCommit'
+  | 'runMode'
+  | 'dataStartAt'
+  | 'dataEndAt'
+  | 'dataCutoffAt'
+  | 'startedAt'
+>;
 
-  const runId = Number(
+export function startReplayRun(input: ReplayRunMetadata): number {
+  validateReplayMetadata(input);
+  assertConfigIdentity(input);
+  return Number(
     input.database
       .prepare(
         `INSERT INTO replay_runs
@@ -63,47 +61,43 @@ export function runReplay(input: ReplayRunInput): ReplayRunResult {
         input.startedAt,
       ).lastInsertRowid,
   );
+}
+
+export function failReplayRun(
+  database: SqliteDatabase,
+  runId: number,
+  error: unknown,
+  completedAt: number,
+): void {
+  const message = error instanceof Error ? error.message : 'Replay failed';
+  database
+    .prepare(
+      `UPDATE replay_runs SET status = 'failed', error_message = ?, completed_at = ?
+       WHERE id = ? AND status = 'running'`,
+    )
+    .run(message, completedAt, runId);
+}
+
+export function runReplay(input: ReplayRunInput): ReplayRunResult {
+  assertCleanReplayWorktree(input.worktreeStatus, input.gitCwd);
+  validateInput(input);
+  assertConfigIdentity(input);
+  const runId = input.runId ?? startReplayRun(input);
+  if (input.runId !== undefined) assertRunningReplay(input, runId);
   try {
-    const dataStartAt = input.dataStartAt ?? 0;
-    const dataEndAt = input.dataEndAt ?? input.dataCutoffAt;
-    const candidates = buildSimulatedCandidates({
-      observations: input.discovery.filter(
-        (observation) =>
-          observation.observedAt >= dataStartAt && observation.observedAt <= dataEndAt,
-      ),
-      evidence: input.evidence.filter(
-        (item) => item.observedAt >= dataStartAt && item.observedAt <= dataEndAt,
-      ),
-      ttlSeconds: input.candidateTtlSeconds,
-      dataCutoffAt: input.dataCutoffAt,
-      deliveryDelayMs: input.deliveryDelayMs,
-    });
     let status: ReplayRunStatus = 'complete';
     let resultCount = 0;
     let fullCount = 0;
     let partialCount = 0;
     let unavailableCount = 0;
-    for (let index = 0; index < candidates.length; index += input.resultBatchSize) {
+    for (let index = 0; index < input.simulatedResults.length; index += input.resultBatchSize) {
       if (input.shouldYield?.()) {
         status = 'paused';
         break;
       }
-      const batch = candidates.slice(index, index + input.resultBatchSize);
+      const batch = input.simulatedResults.slice(index, index + input.resultBatchSize);
       const insertBatch = input.database.transaction(() => {
         for (const candidate of batch) {
-          const candidateEvidence = candidate.evidenceAtDelivery.filter(
-            (item) =>
-              item.tokenAddress === candidate.cycle.tokenAddress &&
-              (item.chain === undefined || item.chain === candidate.cycle.chain),
-          );
-          const hasG2 = candidateEvidence.some((item) => item.kind === 'g2');
-          const hasRest = candidateEvidence.some((item) => item.kind === 'ohlcv');
-          const maxHorizon = Math.max(...input.horizonSeconds);
-          const horizonCutoff =
-            candidate.deliveryAt + (maxHorizon + input.outcomeMaxLatenessSeconds) * 1000;
-          const complete = hasG2 && hasRest && input.dataCutoffAt >= horizonCutoff;
-          const completenessStatus = !hasG2 ? 'unavailable' : complete ? 'full' : 'partial';
-          const outcomeStatus = !hasG2 ? 'unavailable' : complete ? 'full' : 'partial';
           input.database
             .prepare(
               `INSERT INTO replay_results
@@ -114,24 +108,15 @@ export function runReplay(input: ReplayRunInput): ReplayRunResult {
             .run(
               runId,
               candidate.key,
-              JSON.stringify([]),
-              JSON.stringify({
-                simulatedCandidateKey: candidate.key,
-                simulatedConfirmedAt: candidate.confirmationAt,
-                simulatedDeliveredAt: candidate.deliveryAt,
-                evidenceObservedAtDelivery: candidateEvidence.map((item) => item.observedAt),
-              }),
-              JSON.stringify({
-                status: outcomeStatus,
-                entry: hasG2 ? 'recomputed_from_raw_g2' : 'unavailable:no_historical_g2',
-                horizonCutoff,
-              }),
-              completenessStatus,
+              JSON.stringify(candidate.sourceLiveCandidateIds),
+              JSON.stringify(candidate.simulatedSignal),
+              JSON.stringify(candidate.outcome),
+              candidate.completenessStatus,
               input.startedAt,
             );
           resultCount += 1;
-          if (completenessStatus === 'full') fullCount += 1;
-          else if (completenessStatus === 'partial') partialCount += 1;
+          if (candidate.completenessStatus === 'full') fullCount += 1;
+          else if (candidate.completenessStatus === 'partial') partialCount += 1;
           else unavailableCount += 1;
         }
       });
@@ -147,17 +132,68 @@ export function runReplay(input: ReplayRunInput): ReplayRunResult {
       .run(status, JSON.stringify(summary), status === 'paused' ? null : input.now, runId);
     return { runId, status, ...summary };
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Replay failed';
-    input.database
-      .prepare(
-        'UPDATE replay_runs SET status = ?, error_message = ?, completed_at = ? WHERE id = ?',
-      )
-      .run('failed', message, input.now, runId);
+    failReplayRun(input.database, runId, error, input.now);
     throw error;
   }
 }
 
+function assertConfigIdentity(input: ReplayRunMetadata): void {
+  const config = input.database
+    .prepare(
+      'SELECT git_commit AS gitCommit, run_mode AS runMode FROM rule_config_versions WHERE id = ?',
+    )
+    .get(input.configVersionId) as { gitCommit: string; runMode: string } | undefined;
+  if (!config) throw new Error(`Unknown replay config version: ${input.configVersionId}`);
+  if (config.gitCommit !== input.gitCommit || config.runMode !== input.runMode)
+    throw new Error('Replay config version does not match Git commit or run mode');
+}
+
+function assertRunningReplay(input: ReplayRunMetadata, runId: number): void {
+  const row = input.database
+    .prepare(
+      `SELECT config_version_id, data_start_at, data_end_at, data_cutoff_at, status, started_at
+       FROM replay_runs WHERE id = ?`,
+    )
+    .get(runId) as
+    | {
+        config_version_id: number;
+        data_start_at: number | null;
+        data_end_at: number | null;
+        data_cutoff_at: number;
+        status: string;
+        started_at: number;
+      }
+    | undefined;
+  if (
+    !row ||
+    row.status !== 'running' ||
+    row.config_version_id !== input.configVersionId ||
+    row.data_start_at !== (input.dataStartAt ?? null) ||
+    row.data_end_at !== (input.dataEndAt ?? null) ||
+    row.data_cutoff_at !== input.dataCutoffAt ||
+    row.started_at !== input.startedAt
+  )
+    throw new Error('Replay run metadata does not match the prepared run');
+}
+
 function validateInput(input: ReplayRunInput): void {
+  validateReplayMetadata(input);
+  if (
+    !Number.isSafeInteger(input.now) ||
+    !Number.isSafeInteger(input.startedAt) ||
+    input.now < input.startedAt
+  )
+    throw new Error('Invalid replay run clock');
+  if (!Number.isInteger(input.resultBatchSize) || input.resultBatchSize <= 0)
+    throw new Error('Invalid replay result batch size');
+  const keys = new Set<string>();
+  for (const result of input.simulatedResults) {
+    if (!result.key || keys.has(result.key)) throw new Error('Invalid duplicate replay result key');
+    keys.add(result.key);
+  }
+}
+
+function validateReplayMetadata(input: ReplayRunMetadata): void {
   if (!Number.isInteger(input.configVersionId) || input.configVersionId <= 0)
     throw new Error('Invalid replay config version');
   if (!Number.isSafeInteger(input.dataCutoffAt) || input.dataCutoffAt < 0)
@@ -182,19 +218,6 @@ function validateInput(input: ReplayRunInput): void {
     input.dataStartAt > input.dataEndAt
   )
     throw new Error('Replay data start is after data end');
-  if (
-    !Number.isSafeInteger(input.now) ||
-    !Number.isSafeInteger(input.startedAt) ||
-    input.now < input.startedAt
-  )
-    throw new Error('Invalid replay run clock');
-  if (!Number.isInteger(input.resultBatchSize) || input.resultBatchSize <= 0)
-    throw new Error('Invalid replay result batch size');
-  if (
-    input.horizonSeconds.length === 0 ||
-    input.horizonSeconds.some((value) => !Number.isInteger(value) || value <= 0)
-  )
-    throw new Error('Invalid replay horizons');
-  if (!Number.isInteger(input.outcomeMaxLatenessSeconds) || input.outcomeMaxLatenessSeconds < 0)
-    throw new Error('Invalid replay outcome lateness');
+  if (!Number.isSafeInteger(input.startedAt) || input.startedAt < 0)
+    throw new Error('Invalid replay start clock');
 }

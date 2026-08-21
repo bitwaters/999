@@ -140,6 +140,20 @@ export function latestTradeAt(response: JsonRecord): number | undefined {
   return timestamps.length === 0 ? undefined : Math.max(...timestamps);
 }
 
+export function poolAttributesForAddress(
+  response: JsonRecord,
+  network: 'solana' | 'bsc',
+  poolAddress: string,
+): JsonRecord {
+  const item = (Array.isArray(response.data) ? response.data : [])
+    .map(asRecord)
+    .find((candidate) => {
+      const address = asRecord(candidate.attributes).address;
+      return typeof address === 'string' && sameAddress(network, address, poolAddress);
+    });
+  return item ? asRecord(item.attributes) : {};
+}
+
 export function level1RawForPool(
   item: RawPool,
   pool: CanonicalPool,

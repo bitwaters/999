@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { readFileSync, rmSync } from 'node:fs';
+import path from 'node:path';
 import { gunzipSync } from 'node:zlib';
 
 const DEFAULT_REPLAY_WINDOW_MS = 15 * 60 * 1000;
@@ -21,7 +23,8 @@ function parseArgs(argv) {
     const name = argument.slice(2);
     const value = argv[index + 1];
     if (!value || value.startsWith('--')) throw new Error(`missing value for --${name}`);
-    values[name] = value;
+    if (name === 'set') values.set = [...(values.set ?? []), value];
+    else values[name] = value;
     index += 1;
   }
   return { command, values };
@@ -41,90 +44,68 @@ function decodePayload(row) {
   return JSON.parse(text);
 }
 
-function normalizeToken(chain, value) {
-  if (typeof value !== 'string' || value.length === 0) return undefined;
-  return chain === 'bsc' ? value.toLowerCase() : value;
-}
-
-function tokenFromId(chain, value) {
-  if (typeof value !== 'string') return undefined;
-  const prefix = chain === 'bsc' ? 'bsc_' : 'solana_';
-  return normalizeToken(chain, value.startsWith(prefix) ? value.slice(prefix.length) : value);
-}
-
-function discoveryFromEvent(row, payload) {
-  const source = row.capability.endsWith('trending.1m')
-    ? 'trending_1m'
-    : row.capability.endsWith('trending.5m')
-      ? 'trending_5m'
-      : row.capability.endsWith('hot-searches.1m')
-        ? 'hot_searches'
-        : undefined;
-  if (!source || !row.chain) return [];
-  const tokens = source === 'hot_searches'
-    ? (Array.isArray(payload) ? payload.find((item) => item?.chain === row.chain)?.tokens ?? [] : [])
-    : payload?.data?.rank;
-  if (!Array.isArray(tokens)) return [];
-  return tokens.flatMap((token, index) => {
-    const tokenAddress = normalizeToken(row.chain, token?.address ?? token?.token_address);
-    if (!tokenAddress) return [];
-    const visitingCount = Number.isSafeInteger(token?.visiting_count) ? token.visiting_count : undefined;
-    return [{
-      chain: row.chain,
-      tokenAddress,
-      source,
-      observedAt: row.observed_at,
-      ...(source === 'hot_searches' && visitingCount !== undefined ? { visitingCount } : {}),
-      ...(source !== 'hot_searches' ? { rank: index + 1 } : {}),
-    }];
-  });
-}
-
-function poolIdentityMap(database, start, end, maxScanRows) {
-  const pools = new Map();
-  const rows = database
-    .prepare(
-      `SELECT chain, observed_at, payload_encoding, payload
-       FROM provider_events
-       WHERE provider = 'coingecko' AND capability = 'pools.multi.level1'
-         AND observed_at >= ? AND observed_at <= ?
-       ORDER BY observed_at, id LIMIT ?`,
-    )
-    .iterate(start, end, maxScanRows);
-  for (const row of rows) {
-    if (!row.chain) continue;
-    let payload;
-    try { payload = decodePayload(row); } catch { continue; }
-    for (const item of payload?.data ?? []) {
-      const poolAddress = item?.attributes?.address ?? item?.id?.split('_').at(-1);
-      const base = tokenFromId(row.chain, item?.relationships?.base_token?.data?.id);
-      const quote = tokenFromId(row.chain, item?.relationships?.quote_token?.data?.id);
-      if (typeof poolAddress !== 'string') continue;
-      const identities = [base, quote]
-        .filter(Boolean)
-        .map((tokenAddress) => ({ chain: row.chain, tokenAddress, poolAddress }));
-      if (identities.length > 0) pools.set(`${row.chain}:${poolAddress}`, identities);
-    }
-  }
-  return pools;
-}
-
 async function loadRuntime() {
-  const [{ loadConfig }, { openDatabase }, { runReplay }, { buildOutcomeReport }] = await Promise.all([
+  const [
+    { loadConfig },
+    { openDatabase },
+    { runReplay, startReplayRun, failReplayRun },
+    { buildOutcomeReport },
+    { createReplayBackup },
+    { simulateReplay },
+    { loadReplayConfig },
+    { ensureConfigVersion },
+    { default: Database },
+    { extractReplayProviderEvent },
+  ] = await Promise.all([
     import('../dist/config/load.js'),
     import('../dist/persistence/db.js'),
     import('../dist/replay/runner.js'),
     import('../dist/outcomes/report.js'),
+    import('../dist/replay/backup.js'),
+    import('../dist/replay/simulator.js'),
+    import('../dist/replay/config.js'),
+    import('../dist/persistence/config-versions.js'),
+    import('better-sqlite3'),
+    import('../dist/replay/provider-events.js'),
   ]);
   const loaded = await loadConfig('/app/config/bot.yaml');
   const database = openDatabase(loaded.config.storage.database_path, {
     busyTimeoutMs: loaded.config.storage.busy_timeout_ms,
   });
-  return { loaded, database, runReplay, buildOutcomeReport };
+  return {
+    loaded,
+    database,
+    runReplay,
+    startReplayRun,
+    failReplayRun,
+    buildOutcomeReport,
+    createReplayBackup,
+    simulateReplay,
+    loadReplayConfig,
+    ensureConfigVersion,
+    Database,
+    extractReplayProviderEvent,
+  };
 }
 
 async function runReplayCommand(values) {
-  const { loaded, database, runReplay } = await loadRuntime();
+  const runtime = await loadRuntime();
+  const {
+    database,
+    runReplay,
+    startReplayRun,
+    failReplayRun,
+    createReplayBackup,
+    simulateReplay,
+    loadReplayConfig,
+    ensureConfigVersion,
+    Database,
+    extractReplayProviderEvent,
+  } = runtime;
+  let loaded = runtime.loaded;
+  let snapshot;
+  let snapshotPath;
+  let runId;
   try {
     database
       .prepare(
@@ -134,8 +115,36 @@ async function runReplayCommand(values) {
     const configuredVersion = database.prepare(
       'SELECT id FROM rule_config_versions WHERE config_hash = ? AND git_commit = ? AND run_mode = ?',
     ).pluck().get(loaded.configHash, loaded.gitCommit, loaded.runMode);
-    const configVersionId = integerOption(values, 'config-version', Number(configuredVersion));
+    let configVersionId = integerOption(values, 'config-version', Number(configuredVersion));
     if (!configVersionId) throw new Error('no matching saved config version');
+    const overrides = values.set ?? [];
+    if (overrides.length > 0) {
+      const saved = database
+        .prepare('SELECT yaml_snapshot FROM rule_config_versions WHERE id = ?')
+        .get(configVersionId);
+      if (!saved) throw new Error('unknown saved config version');
+      loaded = loadReplayConfig({
+        savedConfigYaml: saved.yaml_snapshot,
+        overrides,
+        worktreeStatus: '',
+      });
+      configVersionId = ensureConfigVersion(
+        database,
+        {
+          config: loaded.config,
+          configHash: loaded.configHash,
+          gitCommit: loaded.gitCommit,
+          normalizedYaml: loaded.normalizedYaml,
+          createdAt: Date.now(),
+        },
+        {
+          maxRows: loaded.config.runtime.sqlite.transaction_max_rows,
+          maxMs: loaded.config.runtime.sqlite.transaction_max_ms,
+        },
+      ).id;
+    } else if (configVersionId !== Number(configuredVersion)) {
+      throw new Error('--config-version requires at least one --set override');
+    }
     const maxScanRows = loaded.config.replay.max_scan_rows;
     const cutoff = integerOption(
       values,
@@ -149,44 +158,16 @@ async function runReplayCommand(values) {
     );
     const end = integerOption(values, 'end', cutoff);
     if (end > cutoff) throw new Error('--end cannot exceed --cutoff');
-    const rows = database
-      .prepare(
-        `SELECT provider, capability, chain, token_address, pool_address, observed_at,
-                payload_encoding, payload
-         FROM provider_events
-         WHERE observed_at >= ? AND observed_at <= ?
-           AND ((provider = 'gmgn' AND capability LIKE 'market.%')
-             OR (provider = 'coingecko' AND capability IN ('pools.multi.level1', 'G2', 'ohlcv.30s', 'trades.level1')))
-         ORDER BY observed_at, id LIMIT ?`,
-      )
-      .iterate(start, end, maxScanRows);
-    const discovery = [];
-    const evidence = [];
-    const pools = poolIdentityMap(database, start, end, maxScanRows);
-    let scannedEvents = 0;
-    for (const row of rows) {
-      scannedEvents += 1;
-      let payload;
-      try { payload = decodePayload(row); } catch { continue; }
-      discovery.push(...discoveryFromEvent(row, payload));
-      const isDiscovery = row.provider === 'gmgn' && row.capability.startsWith('market.');
-      if (isDiscovery && row.chain) {
-        for (const observation of discoveryFromEvent(row, payload))
-          evidence.push({ kind: 'safety', chain: row.chain, tokenAddress: observation.tokenAddress, observedAt: row.observed_at, payload });
-      }
-      if (row.provider !== 'coingecko') continue;
-      if (row.capability === 'G2' && row.chain && row.pool_address) {
-        const identities = pools.get(`${row.chain}:${row.pool_address}`) ?? [];
-        for (const identity of identities)
-          evidence.push({ kind: 'g2', ...identity, observedAt: row.observed_at, payload });
-      } else if (row.capability === 'ohlcv.30s' && row.chain && row.pool_address && row.token_address) {
-        evidence.push({ kind: 'ohlcv', chain: row.chain, poolAddress: row.pool_address, tokenAddress: normalizeToken(row.chain, row.token_address), observedAt: row.observed_at, payload });
-      } else if (row.capability === 'trades.level1' && row.chain && row.pool_address && row.token_address) {
-        evidence.push({ kind: 'trades', chain: row.chain, poolAddress: row.pool_address, tokenAddress: normalizeToken(row.chain, row.token_address), observedAt: row.observed_at, payload });
-      }
-    }
-    let lastBacklogCheck = 0;
-    const result = runReplay({
+    if (start > end) throw new Error('--start cannot exceed --end');
+    const replayWarmupMs =
+      loaded.config.strategies.emerging_breakout.cooldown_seconds * 1000 +
+      Math.max(
+        loaded.config.chains.sol.discovery.candidate_ttl_seconds,
+        loaded.config.chains.bsc.discovery.candidate_ttl_seconds,
+      ) * 1000;
+    const scanStart = Math.max(0, start - replayWarmupMs);
+    const startedAt = Date.now();
+    runId = startReplayRun({
       database,
       configVersionId,
       gitCommit: loaded.gitCommit,
@@ -194,32 +175,100 @@ async function runReplayCommand(values) {
       dataStartAt: start,
       dataEndAt: end,
       dataCutoffAt: cutoff,
-      now: Date.now(),
-      startedAt: Date.now(),
+      startedAt,
+    });
+    snapshotPath = path.join(
+      path.resolve(loaded.config.storage.replay_temp_directory),
+      `replay-snapshot-${process.pid}-${Date.now()}.sqlite`,
+    );
+    await createReplayBackup(database, {
+      destination: snapshotPath,
+      pageBatch: loaded.config.replay.backup_page_batch,
+      minimumFreeBytes: 1,
+    });
+    snapshot = new Database(snapshotPath, { readonly: true, fileMustExist: true });
+    const rows = snapshot
+      .prepare(
+        `SELECT provider, capability, chain, token_address, pool_address, observed_at,
+                payload_encoding, payload
+         FROM provider_events
+         WHERE observed_at >= ? AND observed_at <= ?
+           AND ((provider = 'gmgn' AND capability LIKE 'market.%')
+             OR (provider = 'coingecko' AND capability IN ('tokens.multi', 'pools.multi.level1', 'G2', 'ohlcv.30s', 'trades.level1')))
+       ORDER BY observed_at, id LIMIT ?`,
+      )
+      .iterate(scanStart, cutoff, maxScanRows + 1);
+    const discovery = [];
+    const evidence = [];
+    let scannedEvents = 0;
+    for (const row of rows) {
+      scannedEvents += 1;
+      if (scannedEvents > maxScanRows)
+        throw new Error(`replay scan exceeds configured max_scan_rows=${maxScanRows}`);
+      let payload;
+      try {
+        payload = decodePayload(row);
+      } catch {
+        throw new Error(
+          `invalid replay raw payload: ${row.provider}/${row.capability}@${row.observed_at}`,
+        );
+      }
+      const extracted = extractReplayProviderEvent(row, payload);
+      discovery.push(...extracted.discovery);
+      evidence.push(...extracted.evidence);
+    }
+    const simulatedResults = simulateReplay({
+      config: loaded.config,
+      configVersionId,
+      dataStartAt: start,
+      dataEndAt: end,
+      dataCutoffAt: cutoff,
       deliveryDelayMs: loaded.config.replay.delivery_delay_ms,
-      candidateTtlSeconds: Math.max(
-        loaded.config.chains.sol.discovery.candidate_ttl_seconds,
-        loaded.config.chains.bsc.discovery.candidate_ttl_seconds,
-      ),
-      outcomeMaxLatenessSeconds: loaded.config.outcomes.outcome_max_lateness_seconds,
-      horizonSeconds: loaded.config.outcomes.horizons_seconds,
       discovery,
       evidence,
+    });
+    const result = runReplay({
+      database,
+      runId,
+      configVersionId,
+      gitCommit: loaded.gitCommit,
+      runMode: loaded.runMode,
+      dataStartAt: start,
+      dataEndAt: end,
+      dataCutoffAt: cutoff,
+      now: Date.now(),
+      startedAt,
+      simulatedResults,
       resultBatchSize: loaded.config.replay.result_write_batch,
       worktreeStatus: '',
-      shouldYield: () => {
-        const now = Date.now();
-        if (now - lastBacklogCheck < 1000) return false;
-        lastBacklogCheck = now;
-        const latestObservedAt = Number(
-          database.prepare('SELECT MAX(observed_at) FROM provider_events').pluck().get() ?? 0,
-        );
-        return latestObservedAt > cutoff;
-      },
+      shouldYield: () => replayShouldYield(loaded.config.storage.database_path),
     });
     console.log(JSON.stringify({ ...result, scannedEvents, discovery: discovery.length, evidence: evidence.length }));
+  } catch (error) {
+    if (runId !== undefined) failReplayRun(database, runId, error, Date.now());
+    throw error;
   } finally {
+    snapshot?.close();
+    if (snapshotPath) {
+      rmSync(snapshotPath, { force: true });
+      rmSync(`${snapshotPath}-wal`, { force: true });
+      rmSync(`${snapshotPath}-shm`, { force: true });
+    }
     database.close();
+  }
+}
+
+function replayShouldYield(databasePath) {
+  try {
+    const healthPath = path.join(path.dirname(path.resolve(databasePath)), 'runtime-health.json');
+    const health = JSON.parse(readFileSync(healthPath, 'utf8'));
+    return (
+      health?.components?.sqlite !== 'ok' ||
+      health?.disk?.highWater === true ||
+      health?.provider_probe?.g2QueueHighWater === true
+    );
+  } catch {
+    return true;
   }
 }
 

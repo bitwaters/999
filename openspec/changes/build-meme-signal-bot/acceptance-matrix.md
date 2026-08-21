@@ -16,9 +16,9 @@
 
 - GMGN 预检：SOL/BSC trending 1m/5m、hot-searches 通过；修正 interval 与 1000ms pacing 后深测 52/52 通过。最新有界边界探针以 4 路并发、随后 1 秒 pacing 交替请求 10 次，共 14/14 通过，未观察到 reset/429/封禁；此前观察到真实 rate-limit ban，因此未主动扩大压力，服务端 reset/封禁边界仍未证实。
 - CoinGecko 深测：本次重跑 34/34 通过，覆盖 50 池批量、50 token 批量、REST trades、30 秒 base/quote OHLCV、G2/G3 WebSocket、SOL/BSC 和 credits 计数；REST credit delta=29。合同脚本按池列表 m5 活跃度选取 WebSocket 测试池，避免把无事件的列表首池误判为协议失败。
-- Telegram 只读预检：GMGN/CoinGecko 通过；Telegram `getMe` 因到 Telegram IP 的 `ETIMEDOUT/EHOSTUNREACH` 失败，未发送消息；此前成功记录仍显示 admin private/group 通过、配置 channel 为 `chat not found`。
+- Telegram 只读预检：服务器 `.env` 的 `600` 权限和必需变量校验通过；Telegram `getMe`、admin private、channel、supergroup 全部通过，未发送消息；Shadow 仍只启用 admin private 锚点，channel/group 保持禁用。
 - Docker smoke：当前提交镜像 `999-app:acceptance` 重建成功，容器 healthcheck 输出 healthy，SQLite schemaVersion=2；宿主机 healthcheck 因磁盘高水位而诚实失败；dirty deploy guard 在未提交工作树下于 `git pull` 前以 exit=1 拒绝。Compose 仍包含长期 app、Telegram outbox worker 与带健康检查的原始 Shadow sampler；本次结果证明容器可构建和健康检查通过，但不等同于真实 provider 长期运行或服务器部署。
-- 服务器检查：SSH `lumi-server` 可达，主机为 `dwhkmZxyd8sskPaG`；本地 `main` 已推送到 `https://github.com/bitwaters/999.git`，服务器 `/www/wwwroot/999` 通过 Git 克隆到同一提交，Compose 配置校验和 Docker 生产镜像构建均通过，临时凭据的容器 healthcheck 输出 healthy、schemaVersion=2；Docker `test` stage 内 lint、typecheck 与 88 项测试全部通过。部署脚本已在 `www:www` 所有权的目标目录验证，不再因 Git dubious ownership 误失败，而是在缺少服务器 `.env` 时按预期停止。服务器尚未配置真实 `.env`，未启动真实 provider/Telegram/Shadow 长期采样，也未使用占位凭据启动服务。
+- 服务器检查：SSH `lumi-server` 可达，主机为 `dwhkmZxyd8sskPaG`；服务器 `/www/wwwroot/999` 通过 Git 快进到 `e2d00d1`，Compose 构建和真实 `.env` 配置解析通过，配置 hash 与本地按同一 ID 解析结果一致；Shadow sampler 健康运行，状态为 `running`，当前记录 1280 candidate observations、655 indexing attempts、310 token pools、316 pool snapshots、18 WebSocket events、77 provider calls、无 sampler error。app 已启动但 runtime health 因 Level 1 不完整而保持 `failed`（provider/safety/telegram 已 ok，level1 failed、g2 unknown），deploy.sh 因健康门禁正确返回失败；这不等同于 production 放行。
 - 累计采样只读审计：145 provider calls、GMGN 84 calls/16 failures（429/temporary ban）、CoinGecko REST 45/0 failures、BSC indexing 40/460（8.7%）、SOL indexing 306/310、WebSocket 353 events、credits 仅 4 个采样点；最近 5 分钟切片 GMGN 35/0 失败但 BSC indexing 仅 7/300（2.33%）；Outcome 标签缺失、参数敏感性不可估计，S1 全部保持关闭；审计结论为 `hold_shadow`，不支持 production。
 
 ## 外部验收保留项

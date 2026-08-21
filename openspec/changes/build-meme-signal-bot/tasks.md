@@ -44,13 +44,13 @@
 
 ## 6. G2、ACE 与唯一信号
 
-- [ ] 6.1 实现单 socket 动态 set/unset pool、订阅确认、重连恢复、最大订阅预算和 Armed-only 新订阅规则。
-- [ ] 6.2 实现 callback observed_at 固化、有界 ingest 队列、高水位退订、硬上限窗口失效和 pending ENTRY 取消。
-- [ ] 6.3 实现 target side 转换、raw message 重发去重、trade ID/tx leg 去重、item_index 和 ambiguous duplicate 处理。
-- [ ] 6.4 实现滚动 30 秒 G2 聚合：net buy、buy share、Top1/Top3、覆盖、late/dedup/完整性；buyers 只读取 freshness 合格的 Level 1。
-- [ ] 6.5 将 Attention、Conviction、Organic Growth、EntryQuality 和统一确认表达式实现为带 config version 输入的纯函数。
-- [ ] 6.6 实现 SignalSnapshot 固化和 dispatch guard，验证任何来源/评分不能绕过 safety、freshness、complete 与 overextension。
-- [ ] 6.7 覆盖 quote 方向、多 leg、断线、queue/lag、薄池、高成交低 buyers、集中大单和 pre-send drift 的端到端 fixture 测试。
+- [x] 6.1 实现单 socket 动态 set/unset pool、订阅确认、重连恢复、最大订阅预算和 Armed-only 新订阅规则。
+- [x] 6.2 实现 callback observed_at 固化、有界 ingest 队列、高水位退订、硬上限窗口失效和 pending ENTRY 取消。
+- [x] 6.3 实现 target side 转换、raw message 重发去重、trade ID/tx leg 去重、item_index 和 ambiguous duplicate 处理。
+- [x] 6.4 实现滚动 30 秒 G2 聚合：net buy、buy share、Top1/Top3、覆盖、late/dedup/完整性；buyers 只读取 freshness 合格的 Level 1。
+- [x] 6.5 将 Attention、Conviction、Organic Growth、EntryQuality 和统一确认表达式实现为带 config version 输入的纯函数。
+- [x] 6.6 实现 SignalSnapshot 固化和 dispatch guard，验证任何来源/评分不能绕过 safety、freshness、complete 与 overextension。
+- [x] 6.7 覆盖 quote 方向、多 leg、断线、queue/lag、薄池、高成交低 buyers、集中大单和 pre-send drift 的端到端 fixture 测试。
 
 ## 7. Telegram 与事务 Outbox
 

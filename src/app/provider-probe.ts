@@ -7,10 +7,13 @@ import type { SqliteDatabase } from '../persistence/db.js';
 import { boundedWrite, type WriteBudget } from '../persistence/write-budget.js';
 import { requestJson, type HttpClientOptions } from '../providers/http.js';
 import { gmgnTrendingRawSchema } from '../providers/raw-schemas.js';
-import { gmgnHotSearchesRawSchema } from '../providers/raw-schemas.js';
+import { gmgnHotSearchesRawSchema, coingeckoPoolBatchRawSchema } from '../providers/raw-schemas.js';
 import { CandidateCycleTracker, type DiscoveryObservation } from '../pipeline/candidate.js';
 import { readDiskHealth } from '../runtime/health.js';
 import { evaluateBscSafety, evaluateSolSafety, type SafetyResult } from '../domain/safety.js';
+import { parsePool, selectPrimaryPool, type CanonicalPool } from '../market-data/pools.js';
+import { assertAnalystEndpoint } from '../providers/http.js';
+import { poolRawsForToken } from '../providers/coingecko-adapter.js';
 
 type ProbeState = 'ok' | 'failed' | 'unknown';
 type ProbeLogger = (
@@ -95,24 +98,28 @@ export class ProviderProbe {
 
   private async runOnce(): Promise<void> {
     if (this.stopping || this.inFlight) return;
-    this.inFlight = Promise.allSettled([
-      this.probeGmgn(),
-      this.probeCoinGecko(),
-      this.probeTelegram(),
-    ])
-      .then((results) => {
-        this.lastProbeAt = Date.now();
+    this.inFlight = Promise.allSettled([this.probeGmgn(), this.probeTelegram()])
+      .then(async (results) => {
         const failures = results
           .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
           .map((result) => this.safeError(result.reason));
-        this.lastError = failures[0];
+        try {
+          await this.probeCoinGecko();
+        } catch (error) {
+          failures.push(this.safeError(error));
+        }
+        return failures;
+      })
+      .then((results) => {
+        this.lastProbeAt = Date.now();
+        this.lastError = results[0];
         this.statusChangeListener?.();
         this.options.logger('info', 'provider_probe_status', {
           status: this.status(),
-          failure_count: failures.length,
+          failure_count: results.length,
         });
-        if (failures.length > 0)
-          this.options.logger('warn', 'provider_probe_failed', { errors: failures });
+        if (results.length > 0)
+          this.options.logger('warn', 'provider_probe_failed', { errors: results });
       })
       .finally(() => {
         this.inFlight = undefined;
@@ -391,10 +398,121 @@ export class ProviderProbe {
         },
         this.options.writeBudget,
       );
+      await this.resolveCoinGeckoPools(key);
       this.coingecko = 'ok';
     } catch (error) {
       this.coingecko = 'failed';
       throw error;
+    }
+  }
+
+  private async resolveCoinGeckoPools(key: string): Promise<void> {
+    const disk = readDiskHealth(
+      path.dirname(path.resolve(this.options.config.storage.database_path)),
+      this.options.config.storage.disk_high_water_percent,
+    );
+    if (disk.highWater) throw new Error('disk:high_water');
+    const rows = this.options.database
+      .prepare(
+        `SELECT id, chain, token_address FROM candidates
+         WHERE safety_status = 'pass' AND status != 'expired' AND pool_address IS NULL
+         ORDER BY updated_at ASC LIMIT ?`,
+      )
+      .all(this.options.config.providers.coingecko.max_pools_per_batch * 2) as Array<{
+      id: number;
+      chain: 'sol' | 'bsc';
+      token_address: string;
+    }>;
+    for (const chain of ['sol', 'bsc'] as const) {
+      const chainRows = rows.filter((row) => row.chain === chain);
+      const tokens = [...new Set(chainRows.map((row) => row.token_address))].slice(
+        0,
+        this.options.config.providers.coingecko.max_pools_per_batch,
+      );
+      if (tokens.length === 0) continue;
+      const network = chain === 'sol' ? 'solana' : 'bsc';
+      const url = `${this.options.config.providers.coingecko.rest_base_url}/onchain/networks/${network}/tokens/multi/${tokens.map(encodeURIComponent).join(',')}?include=top_pools&include_composition=true`;
+      assertAnalystEndpoint(url, this.options.config.providers.coingecko.rest_base_url);
+      const result = await requestJson<Record<string, unknown>>(
+        url,
+        { headers: { 'x-cg-pro-api-key': key } },
+        httpOptions(this.options.config, 'coingecko', 'tokens.multi'),
+      );
+      const parsed = coingeckoPoolBatchRawSchema.parse(result.data);
+      const observedAt = Date.now();
+      insertProviderEvent(
+        this.options.database,
+        {
+          provider: 'coingecko',
+          capability: 'tokens.multi',
+          chain,
+          observedAt,
+          schemaVersion: 'coingecko.tokens.multi.v1',
+          payload: JSON.stringify(parsed),
+          billingBucket: 'pool_screening',
+          requestMeta: {
+            endpoint_name: 'onchain.tokens.multi',
+            method: 'GET',
+            status: result.diagnostic.status,
+            response_bytes: Buffer.byteLength(JSON.stringify(parsed)),
+          },
+        },
+        this.options.writeBudget,
+      );
+      this.applyPoolSelections(
+        chainRows.filter((row) => tokens.includes(row.token_address)),
+        parsed,
+        network,
+        observedAt,
+      );
+      await delay(60_000 / this.options.config.providers.coingecko.rest_requests_per_minute);
+    }
+  }
+
+  private applyPoolSelections(
+    rows: Array<{ id: number; chain: 'sol' | 'bsc'; token_address: string }>,
+    response: Record<string, unknown>,
+    network: 'solana' | 'bsc',
+    observedAt: number,
+  ): void {
+    for (const token of [...new Set(rows.map((row) => row.token_address))]) {
+      const parsedPools = poolRawsForToken(response, network, token)
+        .map((raw) => parsePool(raw, network === 'solana' ? 'sol' : 'bsc', token))
+        .filter(
+          (result): result is { status: 'complete'; pool: CanonicalPool } =>
+            result.status === 'complete',
+        )
+        .map((result) => result.pool);
+      const selection = selectPrimaryPool(parsedPools);
+      const tokenRows = rows.filter((row) => row.token_address === token);
+      boundedWrite(this.options.database, this.options.writeBudget, (context) => {
+        if (selection.status === 'resolved') {
+          const pool = selection.pool;
+          const info = this.options.database
+            .prepare(
+              `UPDATE candidates SET pool_address = ?, target_side = ?, funnel_status = 'pool_resolved', updated_at = ?
+               WHERE chain = ? AND token_address = ? AND safety_status = 'pass' AND pool_address IS NULL`,
+            )
+            .run(pool.poolAddress, pool.targetSide, observedAt, pool.chain, token);
+          context.addRows(info.changes);
+        } else {
+          const info = this.options.database
+            .prepare(
+              `UPDATE candidates SET funnel_status = 'pool_unresolved', updated_at = ?
+               WHERE chain = ? AND token_address = ? AND safety_status = 'pass' AND pool_address IS NULL`,
+            )
+            .run(observedAt, tokenRows[0]?.chain ?? (network === 'solana' ? 'sol' : 'bsc'), token);
+          context.addRows(info.changes);
+        }
+      });
+      this.options.logger('info', 'candidate_pool_resolution', {
+        chain: network === 'solana' ? 'sol' : 'bsc',
+        token_address: token,
+        status: selection.status,
+        ...(selection.status === 'resolved'
+          ? { pool_address: selection.pool.poolAddress }
+          : { reason: selection.reason }),
+      });
     }
   }
 

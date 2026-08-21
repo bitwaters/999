@@ -1,0 +1,13 @@
+{
+  "code": 0,
+  "data": {
+    "rank": [
+      {
+        "address": "token-sol-1",
+        "renounced_mint": true,
+        "renounced_freeze_account": true,
+        "volume": "123.45"
+      }
+    ]
+  }
+}

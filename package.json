@@ -10,6 +10,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/copy-migrations.mjs",
     "config:validate": "node --import tsx src/app/validate-config.ts",
+    "provider:contract": "node --import tsx src/providers/contract-check.ts",
     "format": "prettier --write package.json tsconfig.json tsconfig.build.json eslint.config.mjs .prettierrc.json config src",
     "format:check": "prettier --check package.json tsconfig.json tsconfig.build.json eslint.config.mjs .prettierrc.json config src",
     "lint": "eslint .",
@@ -18,6 +19,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",
+    "decimal.js": "^10.6.0",
     "yaml": "^2.8.1",
     "zod": "^4.4.3"
   },

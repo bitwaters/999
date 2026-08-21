@@ -17,12 +17,12 @@
 
 ## 3. Provider 公共能力
 
-- [ ] 3.1 实现统一 HTTP adapter 基础设施：超时、取消、有限重试、429 reset、压缩前/解压后响应大小上限、provider/capability 诊断和脱敏日志。
-- [ ] 3.2 为每个 GMGN capability 建立独立 raw Schema 与脱敏 fixture，覆盖 boolean/integer/数字字符串/yes-no/null/空字符串/未知枚举。
-- [ ] 3.3 为 CoinGecko Analyst pool、50 Pool/Token 批量、G2、30s OHLCV 和 REST Trades 建立独立 raw Schema 与 fixture，并测试运行代码不调用无 Key GeckoTerminal 公共端点。
-- [ ] 3.4 实现金融十进制字符串、整数、时间戳、地址、单位和 DataState 解析器，并测试下溢、上溢、非法精度、future pool time 与 partial/zero/missing/unresolved。
-- [ ] 3.5 实现 GMGN 加权请求队列和 CoinGecko REST 限流/credits 记录，开发/Shadow 不使用 100,000 credits 人为停止线。
-- [ ] 3.6 实现 provider contract 测试命令，允许用真实 Key 刷新脱敏 fixture，但禁止 fixture 和日志包含 secrets。
+- [x] 3.1 实现统一 HTTP adapter 基础设施：超时、取消、有限重试、429 reset、压缩前/解压后响应大小上限、provider/capability 诊断和脱敏日志。
+- [x] 3.2 为每个 GMGN capability 建立独立 raw Schema 与脱敏 fixture，覆盖 boolean/integer/数字字符串/yes-no/null/空字符串/未知枚举。
+- [x] 3.3 为 CoinGecko Analyst pool、50 Pool/Token 批量、G2、30s OHLCV 和 REST Trades 建立独立 raw Schema 与 fixture，并测试运行代码不调用无 Key GeckoTerminal 公共端点。
+- [x] 3.4 实现金融十进制字符串、整数、时间戳、地址、单位和 DataState 解析器，并测试下溢、上溢、非法精度、future pool time 与 partial/zero/missing/unresolved。
+- [x] 3.5 实现 GMGN 加权请求队列和 CoinGecko REST 限流/credits 记录，开发/Shadow 不使用 100,000 credits 人为停止线。
+- [x] 3.6 实现 provider contract 测试命令，允许用真实 Key 刷新脱敏 fixture，但禁止 fixture 和日志包含 secrets。
 
 ## 4. SOL/BSC 前置安全
 

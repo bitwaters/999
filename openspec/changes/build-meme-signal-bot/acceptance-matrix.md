@@ -18,6 +18,7 @@
 - CoinGecko 深测：34/34 通过，覆盖 50 池批量、50 token 批量、REST trades、30 秒 base/quote OHLCV、G2/G3 WebSocket、SOL/BSC 和 credits 计数。
 - Telegram 只读预检：`getMe`、admin private、group 通过；配置的 channel chat 返回 `chat not found`，未发送消息。
 - Docker smoke：`meme-signal-bot:local` 构建成功；容器 healthcheck 通过，SQLite schemaVersion=1、status=healthy；dirty deploy guard 在未提交工作树下于 `git pull` 前以 exit=1 拒绝。
+- 服务器检查：SSH `lumi-server` 可达，但未发现本项目 Git 根目录、Compose 文件或对应容器；现有 `/www/wwwroot/818`、`/www/wwwroot/dianzigou`、`/www/wwwroot/dianzigoubot` 均为其他项目，未执行任何远端写入。
 
 ## 外部验收保留项
 

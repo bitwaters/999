@@ -77,6 +77,17 @@ export type ProviderProbeStatus = {
   lastError?: string;
 };
 
+export function latestLevel1ObservedAt(poolObservedAt: number, tradeObservedAt: number): number {
+  if (
+    !Number.isSafeInteger(poolObservedAt) ||
+    poolObservedAt < 0 ||
+    !Number.isSafeInteger(tradeObservedAt) ||
+    tradeObservedAt < 0
+  )
+    throw new Error('Invalid Level 1 evidence timestamp');
+  return Math.max(poolObservedAt, tradeObservedAt);
+}
+
 export type ProviderProbeOptions = {
   config: BotConfig;
   secrets: Record<string, string>;
@@ -663,16 +674,17 @@ export class ProviderProbe {
           this.options.writeBudget,
         );
         attempted += 1;
+        const level1ObservedAt = latestLevel1ObservedAt(observedAt, tradeObservedAt);
         const level1 = parseLevel1Snapshot(
           level1RawForPool(
             raw,
             parsedPool.pool,
             findPoolAttributes(parsed, network, row.pool_address),
-            observedAt,
+            level1ObservedAt,
             latestTradeAt(tradePayload),
           ),
           parsedPool.pool,
-          observedAt,
+          level1ObservedAt,
         );
         if (level1.status !== 'complete') continue;
         complete += 1;

@@ -122,6 +122,13 @@ test('maps pool snapshots and trades to a fresh Level 1 raw record', () => {
   assert.equal(level1.last_trade_at, Date.parse('2026-08-21T00:05:01Z'));
   assert.equal(level1.buyers, 5);
   assert.equal(level1.net_buy_usd, '12.25');
+  assert.deepEqual((level1.windows as Record<string, unknown>).m5, {
+    state: 'complete',
+    coverage_seconds: 300,
+    buys: 4,
+    buyers: 5,
+    volume_usd: '250.25',
+  });
 });
 
 test('matches BSC token and pool addresses without depending on checksum casing', () => {

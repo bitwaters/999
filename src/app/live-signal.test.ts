@@ -45,6 +45,9 @@ const level1: Level1Snapshot = {
   netBuyUsd: '1500',
   poolAgeSeconds: 120,
   lastTradeAt: 29_000,
+  windows: {
+    m5: { state: 'partial', coverageSeconds: 120, buys: 10, buyers: 10, volumeUsd: '2000' },
+  },
 };
 const g2: G2Window = {
   status: 'complete',

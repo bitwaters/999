@@ -149,9 +149,14 @@ export function level1RawForPool(
 ): RawLevel1 {
   const transactions = asRecord(attributes.transactions);
   const window = asRecord(transactions.m5);
-  const volume = asRecord(attributes.volume_usd).m5;
+  const volumes = asRecord(attributes.volume_usd);
+  const volume = volumes.m5;
   const netBuy = asRecord(attributes.net_buy_volume_usd).m5;
   const priceField = pool.targetSide === 'base' ? 'base_token_price_usd' : 'quote_token_price_usd';
+  const ageSeconds =
+    Number.isSafeInteger(pool.poolCreatedAt) && pool.poolCreatedAt <= observedAt
+      ? Math.floor((observedAt - pool.poolCreatedAt) / 1000)
+      : -1;
   return {
     pool_address: item.pool_address,
     token_address: pool.tokenAddress,
@@ -164,11 +169,24 @@ export function level1RawForPool(
     sellers: window.sellers,
     volume_usd: volume,
     net_buy_usd: netBuy,
-    pool_age_seconds:
-      Number.isSafeInteger(pool.poolCreatedAt) && pool.poolCreatedAt <= observedAt
-        ? Math.floor((observedAt - pool.poolCreatedAt) / 1000)
-        : -1,
+    pool_age_seconds: ageSeconds,
     last_trade_at: lastTradeAt,
+    windows: Object.fromEntries(
+      (['m5', 'm15', 'm30'] as const).map((key) => {
+        const seconds = key === 'm5' ? 300 : key === 'm15' ? 900 : 1_800;
+        const values = asRecord(transactions[key]);
+        return [
+          key,
+          {
+            state: ageSeconds >= seconds ? 'complete' : ageSeconds >= 0 ? 'partial' : 'invalid',
+            coverage_seconds: ageSeconds < 0 ? 0 : Math.max(1, Math.min(ageSeconds, seconds)),
+            buys: values.buys,
+            buyers: values.buyers,
+            volume_usd: volumes[key],
+          },
+        ];
+      }),
+    ),
   };
 }
 

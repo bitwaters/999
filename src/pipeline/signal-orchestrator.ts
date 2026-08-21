@@ -10,12 +10,14 @@ import {
   type RuleDecision,
   type SignalSnapshot,
 } from './ace.js';
+import { evaluateAge } from './age.js';
 
 export type SignalOrchestrationInput = {
   candidateKey: string;
   chain: 'sol' | 'bsc';
   tokenAddress: string;
   poolAddress: string;
+  poolCreatedAt: number;
   cycleStartedAt: number;
   confirmedAt: number;
   configVersionId: string;
@@ -62,6 +64,14 @@ export function orchestrateSignal(
     },
     strategy.entry_quality,
   );
+  const age = evaluateAge(
+    input.poolCreatedAt,
+    input.confirmedAt,
+    chain,
+    config.global.max_clock_skew_seconds,
+    input.level1.windows,
+    input.g2.coverageSeconds,
+  );
   const result = solidifyEmergingSignal({
     candidateKey: input.candidateKey,
     chain: input.chain,
@@ -86,6 +96,7 @@ export function orchestrateSignal(
     conviction,
     organic,
     entryQuality,
+    age,
     ...(input.anchorCooldownUntil === undefined
       ? {}
       : { anchorCooldownUntil: input.anchorCooldownUntil }),

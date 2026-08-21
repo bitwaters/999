@@ -33,6 +33,9 @@ const level1: Level1Snapshot = {
   netBuyUsd: '1500',
   poolAgeSeconds: 120,
   lastTradeAt: 1_000,
+  windows: {
+    m5: { state: 'partial', coverageSeconds: 120, buys: 10, buyers: 10, volumeUsd: '2000' },
+  },
 };
 const g2: G2Window = {
   status: 'partial',
@@ -57,6 +60,7 @@ test('signal orchestration remains blocked when G2 is not complete', () => {
       chain: 'sol',
       tokenAddress: 'token',
       poolAddress: 'pool',
+      poolCreatedAt: 1,
       cycleStartedAt: 1_000,
       confirmedAt: 1_500,
       configVersionId: '1',
@@ -82,6 +86,7 @@ test('signal orchestration rejects a stale safety pass before solidification', (
       chain: 'sol',
       tokenAddress: 'token',
       poolAddress: 'pool',
+      poolCreatedAt: 1,
       cycleStartedAt: 1_000,
       confirmedAt: 61_000,
       configVersionId: '1',
@@ -99,4 +104,44 @@ test('signal orchestration rejects a stale safety pass before solidification', (
   assert.equal(result.status, 'blocked');
   if (result.status === 'blocked')
     assert.ok(result.reasons.includes('safety:not_fresh_or_config_mismatch'));
+});
+
+test('signal orchestration fail-closes established pools without every configured window', () => {
+  const confirmedAt = 1_900_000;
+  const result = orchestrateSignal(
+    {
+      candidateKey: 'sol:token',
+      chain: 'sol',
+      tokenAddress: 'token',
+      poolAddress: 'pool',
+      poolCreatedAt: 1,
+      cycleStartedAt: 1_000,
+      confirmedAt,
+      configVersionId: '1',
+      safety: { ...safety, checkedAt: confirmedAt - 1_000, expiresAt: confirmedAt + 59_000 },
+      level1: {
+        ...level1,
+        observedAt: confirmedAt - 1_000,
+        windows: {
+          m5: {
+            state: 'complete',
+            coverageSeconds: 300,
+            buys: 10,
+            buyers: 10,
+            volumeUsd: '2000',
+          },
+        },
+      },
+      g2: { ...g2, status: 'complete', coverageSeconds: 30 },
+      candidateFresh: true,
+      poolStable: true,
+      priceExtension: '0.1',
+      preSendDrift: '0.01',
+      attention: { status: 'pass', reasons: [] },
+    },
+    config.config,
+  );
+  assert.equal(result.status, 'blocked');
+  if (result.status === 'blocked')
+    assert.ok(result.reasons.includes('age:incomplete:window:m15:missing'));
 });

@@ -5,6 +5,7 @@ import {
   parseTimestampMs,
 } from '../providers/parsing.js';
 import type { DataState } from '../providers/types.js';
+import type { WindowKey, WindowStats } from '../pipeline/age.js';
 import type { CanonicalPool } from './pools.js';
 
 export type RawLevel1 = Record<string, unknown>;
@@ -26,6 +27,7 @@ export type Level1Snapshot = {
   netBuyUsd: string;
   poolAgeSeconds: number;
   lastTradeAt: number;
+  windows: Partial<Record<WindowKey, WindowStats>>;
 };
 
 export type Level1ParseResult =
@@ -92,6 +94,12 @@ export function parseLevel1Snapshot(
         netBuyUsd,
         poolAgeSeconds,
         lastTradeAt,
+        windows: parseWindows(raw.windows, {
+          buys,
+          buyers,
+          volumeUsd,
+          poolAgeSeconds,
+        }),
       },
     };
   } catch (error) {
@@ -100,6 +108,41 @@ export function parseLevel1Snapshot(
       reasons: [error instanceof Error ? error.message : 'invalid:level1'],
     };
   }
+}
+
+function parseWindows(
+  raw: unknown,
+  fallback: { buys: number; buyers: number; volumeUsd: string; poolAgeSeconds: number },
+): Partial<Record<WindowKey, WindowStats>> {
+  const windows: Partial<Record<WindowKey, WindowStats>> = {};
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    for (const key of ['m1', 'm5', 'm15', 'm30'] as const) {
+      const item = (raw as Record<string, unknown>)[key];
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+      const value = item as Record<string, unknown>;
+      try {
+        const state = value.state;
+        if (state !== 'complete' && state !== 'partial') continue;
+        windows[key] = {
+          state,
+          coverageSeconds: parseInteger(value.coverage_seconds, { min: 1 }),
+          buys: parseInteger(value.buys, { min: 0 }),
+          buyers: parseInteger(value.buyers, { min: 0 }),
+          volumeUsd: parseDecimalString(value.volume_usd, { nonNegative: true }).toString(),
+        };
+      } catch {
+        // Invalid or missing window evidence stays absent and therefore fails closed in age gating.
+      }
+    }
+  }
+  windows.m5 ??= {
+    state: fallback.poolAgeSeconds >= 300 ? 'complete' : 'partial',
+    coverageSeconds: Math.max(1, Math.min(fallback.poolAgeSeconds, 300)),
+    buys: fallback.buys,
+    buyers: fallback.buyers,
+    volumeUsd: fallback.volumeUsd,
+  };
+  return windows;
 }
 
 export function isLevel1Fresh(

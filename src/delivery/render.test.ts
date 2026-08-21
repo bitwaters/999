@@ -18,6 +18,12 @@ const snapshot: SignalSnapshot = {
   conviction: { status: 'pass', reasons: [] },
   organic: { status: 'pass', reasons: [] },
   entryQuality: { status: 'pass', reasons: [] },
+  age: {
+    status: 'pass',
+    mode: 'newborn',
+    coverageSeconds: 60,
+    rates: { buys: '0.1', buyers: '0.1', volumeUsd: '10' },
+  },
 };
 
 test('entry renderer restricts channel/group to concise content', () => {

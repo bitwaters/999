@@ -52,6 +52,7 @@ export function createLiveSignal(input: LiveSignalInput): LiveSignalResult {
       chain: input.pool.chain,
       tokenAddress: input.pool.tokenAddress,
       poolAddress: input.pool.poolAddress,
+      poolCreatedAt: input.pool.poolCreatedAt,
       cycleStartedAt: input.cycle.cycleStartedAt,
       confirmedAt: input.confirmedAt,
       configVersionId: String(input.configVersionId),

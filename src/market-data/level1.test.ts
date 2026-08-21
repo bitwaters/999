@@ -60,6 +60,36 @@ test('Level 1 parser keeps buyers distinct from trade counts and enforces freshn
   );
 });
 
+test('Level 1 preserves independent age windows and omits invalid window evidence', () => {
+  const parsed = parseLevel1Snapshot(
+    {
+      ...raw(),
+      windows: {
+        m5: {
+          state: 'partial',
+          coverage_seconds: 120,
+          buys: 10,
+          buyers: 8,
+          volume_usd: '500',
+        },
+        m15: {
+          state: 'complete',
+          coverage_seconds: 900,
+          buys: 'invalid',
+          buyers: 12,
+          volume_usd: '1000',
+        },
+      },
+    },
+    pool,
+    10_000,
+  );
+  assert.equal(parsed.status, 'complete');
+  if (parsed.status !== 'complete') return;
+  assert.equal(parsed.snapshot.windows.m5?.coverageSeconds, 120);
+  assert.equal(parsed.snapshot.windows.m15, undefined);
+});
+
 test('Level 1 batches deduplicate and cap each chain at 50 pools', () => {
   const pools = Array.from({ length: 51 }, (_, index) => ({
     ...pool,

@@ -41,6 +41,9 @@ const level1: Level1Snapshot = {
   netBuyUsd: '1500',
   poolAgeSeconds: 100,
   lastTradeAt: 1_000,
+  windows: {
+    m5: { state: 'partial', coverageSeconds: 100, buys: 10, buyers: 8, volumeUsd: '2000' },
+  },
 };
 const g2: G2Window = {
   status: 'complete',
@@ -153,6 +156,12 @@ test('unique Emerging Breakout requires all hard gates and dispatch guard cancel
     conviction,
     organic,
     entryQuality,
+    age: {
+      status: 'pass',
+      mode: 'newborn',
+      coverageSeconds: 100,
+      rates: { buys: '0.1', buyers: '0.08', volumeUsd: '20' },
+    },
   });
   assert.equal(solidified.status, 'pass');
   if (solidified.status !== 'pass') return;
@@ -190,6 +199,12 @@ test('unique Emerging Breakout requires all hard gates and dispatch guard cancel
       conviction,
       organic,
       entryQuality,
+      age: {
+        status: 'pass',
+        mode: 'newborn',
+        coverageSeconds: 100,
+        rates: { buys: '0.1', buyers: '0.08', volumeUsd: '20' },
+      },
     }).status,
     'blocked',
   );

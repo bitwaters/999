@@ -4,6 +4,7 @@ import { canReuseSafetyPass, type SafetyResult } from '../domain/safety.js';
 import { parseDecimalString } from '../providers/parsing.js';
 import type { G2Window } from '../market-data/g2.js';
 import { isLevel1Fresh, type Level1Snapshot } from '../market-data/level1.js';
+import type { AgeEvaluation } from './age.js';
 
 export type RuleDecision = {
   status: 'pass' | 'rejected' | 'incomplete';
@@ -146,6 +147,7 @@ export type SignalSnapshot = {
   conviction: RuleDecision;
   organic: RuleDecision;
   entryQuality: RuleDecision;
+  age: Extract<AgeEvaluation, { status: 'pass' }>;
 };
 
 export type SignalSolidificationInput = {
@@ -177,6 +179,7 @@ export type SignalSolidificationInput = {
   conviction: RuleDecision;
   organic: RuleDecision;
   entryQuality: RuleDecision;
+  age: AgeEvaluation;
   anchorCooldownUntil?: number;
 };
 
@@ -194,6 +197,7 @@ export function solidifyEmergingSignal(
   if (!input.level1Fresh) reasons.push('level1:stale');
   if (input.g2State !== 'complete') reasons.push(`g2:${input.g2State}`);
   if (!input.evidenceComplete) reasons.push('evidence:incomplete');
+  if (input.age.status !== 'pass') reasons.push(`age:${input.age.status}:${input.age.reason}`);
   for (const [name, decision] of Object.entries({
     attention: input.attention,
     conviction: input.conviction,
@@ -227,6 +231,7 @@ export function solidifyEmergingSignal(
         conviction: input.conviction,
         organic: input.organic,
         entryQuality: input.entryQuality,
+        age: input.age as Extract<AgeEvaluation, { status: 'pass' }>,
       },
     };
   } catch {

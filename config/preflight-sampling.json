@@ -17,7 +17,7 @@
     "index_retry_max_seconds": 600,
     "pool_snapshot_every_ticks": 2,
     "usage_check_every_ticks": 30,
-    "pending_ttl_minutes": 30,
+    "pending_ttl_minutes": 120,
     "active_pool_ttl_minutes": 120,
     "max_tokens_per_chain": 50,
     "max_pools_per_chain": 50,

@@ -589,10 +589,10 @@ export class ProviderProbe {
         } else {
           const info = this.options.database
             .prepare(
-              `UPDATE candidates SET last_seen_at = ?,
+          `UPDATE candidates SET last_seen_at = ?,
                status = CASE WHEN status IN ('armed', 'confirmed-pending-anchor', 'delivered', 'completed')
                              THEN status ELSE ? END,
-               safety_status = ?, safety_json = ?,
+               safety_status = ?, safety_json = ?, config_version_id = ?,
                funnel_status = CASE WHEN funnel_status IN ('armed', 'confirmed-pending-anchor', 'delivered', 'completed')
                                     THEN funnel_status ELSE 'safety_checked' END,
                updated_at = ? WHERE id = ?`,
@@ -602,6 +602,7 @@ export class ProviderProbe {
               cycle.status,
               safety.status,
               JSON.stringify(safety),
+              this.options.configVersionId,
               Date.now(),
               existing,
             );

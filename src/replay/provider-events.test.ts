@@ -39,15 +39,18 @@ test('replay extraction isolates malformed provider token addresses', () => {
     },
     {
       data: {
-        rank: [
-          { address: ' 0xinvalid ' },
-          { address: '0xABC', renounced: true },
-        ],
+        rank: [{ address: ' 0xinvalid ' }, { address: '0xABC', renounced: true }],
       },
     },
   );
-  assert.deepEqual(extracted.discovery.map((item) => item.tokenAddress), ['0xabc']);
-  assert.deepEqual(extracted.evidence.map((item) => item.tokenAddress), ['0xabc']);
+  assert.deepEqual(
+    extracted.discovery.map((item) => item.tokenAddress),
+    ['0xabc'],
+  );
+  assert.deepEqual(
+    extracted.evidence.map((item) => item.tokenAddress),
+    ['0xabc'],
+  );
 });
 
 test('replay extraction includes targeted GMGN token security refreshes', () => {
@@ -96,4 +99,19 @@ test('replay extraction distinguishes token pool, Level 1, G2, trades and OHLCV 
     );
     assert.equal(result.evidence[0]?.kind, kind);
   }
+});
+
+test('replay recomputes decisions instead of consuming live runtime scheduler events', () => {
+  const result = extractReplayProviderEvent(
+    {
+      provider: 'runtime',
+      capability: 'scheduler.decision',
+      chain: 'sol',
+      token_address: 'token',
+      pool_address: 'pool',
+      observed_at: 2_000,
+    },
+    { decision: 'armed', configVersionId: '1' },
+  );
+  assert.deepEqual(result, { discovery: [], evidence: [] });
 });

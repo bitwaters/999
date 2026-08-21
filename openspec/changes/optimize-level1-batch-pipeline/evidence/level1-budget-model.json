@@ -1,0 +1,73 @@
+{
+  "generated_at": "2026-08-21T22:58:43.448Z",
+  "method": {
+    "database": "server SQLite opened readonly",
+    "timeline_rule": "each Candidate Cycle may only use discovery and pool snapshots from cycle_started_at through last_seen_at + chain TTL",
+    "server_files_written": false,
+    "database_mutated": false,
+    "script": "scripts/level1-budget-model.mjs"
+  },
+  "config": {
+    "min_buyers": 5,
+    "min_reserve_usd": 10000,
+    "min_net_buy_usd": 1000
+  },
+  "chains": {
+    "sol": {
+      "candidate_cycles": 7267,
+      "safety_pass": 7224,
+      "safety_pass_with_pool": 7222,
+      "batch_snapshot_matched": 6693,
+      "structural_complete": 6671,
+      "attention_ever_pass": 1613,
+      "ever_armed": 4,
+      "dynamic_distributions": {
+        "buyers_m5": { "samples": 6671, "p10": 1, "p50": 8, "p90": 64 },
+        "reserve_usd": { "samples": 6671, "p10": 2327.5709, "p50": 11813.3041, "p90": 188206.2581 },
+        "volume_m5_usd": { "samples": 6671, "p10": 92.6009483508, "p50": 1270.7851997252, "p90": 9536.4195005179 },
+        "net_buy_m5_usd": { "samples": 6671, "p10": -865.526247712, "p50": 5.6170728697, "p90": 1368.978912822 },
+        "buyers_recovery": { "initially_below": 2060, "later_recovered": 394, "recovery_percent": 19.13 },
+        "reserve_recovery": { "initially_below": 3164, "later_recovered": 24, "recovery_percent": 0.76 },
+        "net_buy_recovery": { "initially_below": 5578, "later_recovered": 335, "recovery_percent": 6.01 }
+      },
+      "per_100_structural_candidates": {
+        "attention_finalist_upper_bound": 24.18,
+        "observed_ever_armed": 0.06,
+        "legacy_rest_calls": 102,
+        "adaptive_rest_calls_attention_upper_bound": 26.18,
+        "adaptive_rest_calls_observed_capacity": 2.06
+      }
+    },
+    "bsc": {
+      "candidate_cycles": 5671,
+      "safety_pass": 5068,
+      "safety_pass_with_pool": 4737,
+      "batch_snapshot_matched": 3841,
+      "structural_complete": 3826,
+      "attention_ever_pass": 891,
+      "ever_armed": 29,
+      "dynamic_distributions": {
+        "buyers_m5": { "samples": 3826, "p10": 0, "p50": 2, "p90": 7 },
+        "reserve_usd": { "samples": 3826, "p10": 8557.6733, "p50": 25861.7803, "p90": 292720.5982 },
+        "volume_m5_usd": { "samples": 3826, "p10": 0.6668916599, "p50": 135.8122651623, "p90": 1669.2399789184 },
+        "net_buy_m5_usd": { "samples": 3826, "p10": -422.1957886129, "p50": 0, "p90": 374.42006485 },
+        "buyers_recovery": { "initially_below": 3120, "later_recovered": 463, "recovery_percent": 14.84 },
+        "reserve_recovery": { "initially_below": 522, "later_recovered": 10, "recovery_percent": 1.92 },
+        "net_buy_recovery": { "initially_below": 3677, "later_recovered": 276, "recovery_percent": 7.51 }
+      },
+      "per_100_structural_candidates": {
+        "attention_finalist_upper_bound": 23.29,
+        "observed_ever_armed": 0.76,
+        "legacy_rest_calls": 102,
+        "adaptive_rest_calls_attention_upper_bound": 25.29,
+        "adaptive_rest_calls_observed_capacity": 2.76
+      }
+    }
+  },
+  "conclusions": [
+    "Dynamic buyers and net-buy thresholds cannot be permanent pre-observation rejection gates because a material share recovers within the same Candidate Cycle.",
+    "Attention alone is not a sufficient finalist admission budget: its theoretical upper bound would use about 25-26 REST calls per 100 structural candidates, while the 80% reduction target permits at most about 20 total calls.",
+    "Initialization trades must therefore remain conditional on an actual free logical G2 reservation; dynamic metrics rank and recheck candidates but do not create additional capacity.",
+    "The historical Armed ratio predicts roughly 2-3 REST calls per 100 structural candidates, but this is an observed baseline rather than an acceptance guarantee."
+  ]
+}

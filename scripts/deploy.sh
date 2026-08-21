@@ -26,7 +26,8 @@ fi
 export CONTAINERIZED_RUN=1
 export BUILD_GIT_COMMIT="$("${git_cmd[@]}" rev-parse HEAD)"
 export BUILD_WORKTREE_STATUS=''
-docker compose build
-docker compose up -d --wait app sampler
+docker compose --profile sampling stop sampler
+docker compose build app
+docker compose up -d --wait app
 docker compose run --rm app node dist/app/healthcheck.js
-docker compose ps
+docker compose ps --all

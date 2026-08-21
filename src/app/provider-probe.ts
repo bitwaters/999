@@ -7,7 +7,12 @@ import type { BotConfig } from '../config/schema.js';
 import { insertProviderEvent } from '../persistence/provider-events.js';
 import type { SqliteDatabase } from '../persistence/db.js';
 import { boundedWrite, type WriteBudget } from '../persistence/write-budget.js';
-import { requestJson, type HttpClientOptions } from '../providers/http.js';
+import {
+  assertAnalystEndpoint,
+  ProviderRequestError,
+  requestJson,
+  type HttpClientOptions,
+} from '../providers/http.js';
 import { gmgnTrendingRawSchema } from '../providers/raw-schemas.js';
 import {
   gmgnHotSearchesRawSchema,
@@ -31,17 +36,31 @@ import {
   type SafetyResult,
 } from '../domain/safety.js';
 import { parsePool, selectPrimaryPool, type CanonicalPool } from '../market-data/pools.js';
-import { assertAnalystEndpoint } from '../providers/http.js';
 import { parseDecimalString } from '../providers/parsing.js';
 import {
   latestTradeAt,
   level1RawForPool,
+  level1ScreeningRawForPool,
   parseCoinGeckoOhlcv30s,
   poolRawForAddress,
   poolRawsForToken,
   toCandle,
 } from '../providers/coingecko-adapter.js';
 import { isLevel1Fresh, parseLevel1Snapshot, type Level1Snapshot } from '../market-data/level1.js';
+import {
+  parseLevel1ScreeningSnapshot,
+  promoteLevel1ScreeningSnapshot,
+  type Level1ScreeningSnapshot,
+} from '../market-data/level1-screening.js';
+import {
+  CoinGeckoRestScheduler,
+  FinalistReservationBook,
+  FreshSingleFlightCache,
+  chunkCoinGeckoPools,
+  finalistKey,
+  g2IdentityKey,
+  type CoinGeckoWork,
+} from '../providers/coingecko-scheduler.js';
 import { CoinGeckoG2Client, type G2ClientStatus } from '../providers/coingecko-g2.js';
 import { evaluateDispatchGuard, type SignalSnapshot } from '../pipeline/ace.js';
 import { evaluateCandidateAttention } from '../pipeline/candidate-attention.js';
@@ -86,6 +105,26 @@ export type ProviderProbeStatus = {
   telegram: ProbeState;
   g2QueueSize: number;
   g2QueueHighWater: boolean;
+  scheduler: {
+    queued: number;
+    running: number;
+    oldestWaitMs: number;
+    byKind: Record<string, number>;
+    effectiveRpm: number;
+    persistedDue: number;
+    batchConcurrency: number;
+    tradeConcurrency: number;
+    creditDeferred: boolean;
+    remainingCredits?: number;
+    burnCreditsPerHour?: number;
+    projectedExhaustionAt?: number;
+    persistedOldestWaitMs: number;
+    completed: number;
+    failed: number;
+    rejected: number;
+    lastQueueWaitMs: number;
+    lastRunLatencyMs: number;
+  };
   lastProbeAt?: number;
   lastError?: string;
 };
@@ -122,11 +161,7 @@ export function level1ProbeState(attempted: number, complete: number): ProbeStat
   return complete > 0 ? 'ok' : 'failed';
 }
 
-export function sameChainAddress(
-  chain: 'sol' | 'bsc',
-  left: string,
-  right: string,
-): boolean {
+export function sameChainAddress(chain: 'sol' | 'bsc', left: string, right: string): boolean {
   return chain === 'bsc' ? left.toLowerCase() === right.toLowerCase() : left === right;
 }
 
@@ -148,9 +183,7 @@ export function shouldRefreshConfirmationEvidence(reasons: readonly string[]): b
   ]);
   const hasRefreshableGap = unique.some((reason) => refreshable.has(reason));
   if (!hasRefreshableGap) return false;
-  return unique.every(
-    (reason) => refreshable.has(reason) || reason === 'conviction:incomplete',
-  );
+  return unique.every((reason) => refreshable.has(reason) || reason === 'conviction:incomplete');
 }
 
 export async function refreshConfirmationEvidence(input: {
@@ -171,7 +204,10 @@ export async function refreshConfirmationEvidence(input: {
 }
 
 export function shouldRearmG2Candidate(status: string, funnelStatus: string): boolean {
-  return status !== 'expired' && (status === 'armed' || funnelStatus === 'level1_checked');
+  return (
+    status !== 'expired' &&
+    (status === 'armed' || funnelStatus === 'level1_screened' || funnelStatus === 'level1_checked')
+  );
 }
 
 export function canArmG2Candidate(
@@ -198,40 +234,69 @@ type Level1CandidateRow = {
   chain: 'sol' | 'bsc';
   token_address: string;
   pool_address: string;
+  cycle_started_at: number;
+  status: string;
+  funnel_status: string;
+  updated_at: number;
 };
 
 export function selectLevel1CandidateRows(
   database: SqliteDatabase,
   limitPerChain: number,
+  configVersionId: number,
+  now: number,
+  ttlSeconds: Record<'sol' | 'bsc', number>,
 ): Level1CandidateRow[] {
-  if (!Number.isSafeInteger(limitPerChain) || limitPerChain <= 0)
+  if (
+    !Number.isSafeInteger(limitPerChain) ||
+    limitPerChain <= 0 ||
+    !Number.isSafeInteger(configVersionId) ||
+    configVersionId <= 0 ||
+    !Number.isSafeInteger(now) ||
+    now < 0 ||
+    !Number.isSafeInteger(ttlSeconds.sol) ||
+    ttlSeconds.sol <= 0 ||
+    !Number.isSafeInteger(ttlSeconds.bsc) ||
+    ttlSeconds.bsc <= 0
+  )
     throw new Error('Invalid Level 1 candidate limit');
   return database
     .prepare(
       `WITH current_cycles AS (
-         SELECT id, chain, token_address, pool_address, status, updated_at,
+         SELECT id, chain, token_address, pool_address, cycle_started_at, status, funnel_status, updated_at,
                 ROW_NUMBER() OVER (
                   PARTITION BY chain, token_address
                   ORDER BY cycle_started_at DESC, id DESC
                 ) AS cycle_rank
          FROM candidates
-         WHERE safety_status = 'pass' AND status != 'expired' AND pool_address IS NOT NULL
+         WHERE config_version_id = ? AND safety_status = 'pass' AND status != 'expired'
+           AND pool_address IS NOT NULL
+           AND (status IN ('armed', 'confirmed-pending-anchor', 'delivered')
+                OR CAST(json_extract(safety_json, '$.expiresAt') AS INTEGER) > ?)
+           AND (status IN ('armed', 'confirmed-pending-anchor', 'delivered')
+                OR last_seen_at >= CASE chain WHEN 'sol' THEN ? ELSE ? END)
        ), ranked AS (
-         SELECT id, chain, token_address, pool_address,
+         SELECT id, chain, token_address, pool_address, cycle_started_at, status, funnel_status, updated_at,
                 ROW_NUMBER() OVER (
                   PARTITION BY chain
                   ORDER BY
                     CASE WHEN status IN ('armed', 'confirmed-pending-anchor', 'delivered')
                          THEN 1 ELSE 0 END DESC,
-                    updated_at DESC, pool_address ASC, token_address ASC
+                    updated_at ASC, pool_address ASC, token_address ASC
                 ) AS chain_rank
          FROM current_cycles WHERE cycle_rank = 1
        )
-       SELECT id, chain, token_address, pool_address
+       SELECT id, chain, token_address, pool_address, cycle_started_at, status, funnel_status, updated_at
        FROM ranked WHERE chain_rank <= ?
        ORDER BY chain ASC, chain_rank ASC`,
     )
-    .all(limitPerChain) as Level1CandidateRow[];
+    .all(
+      configVersionId,
+      now,
+      now - ttlSeconds.sol * 1000,
+      now - ttlSeconds.bsc * 1000,
+      limitPerChain,
+    ) as Level1CandidateRow[];
 }
 
 type ArmCandidateRow = {
@@ -241,6 +306,8 @@ type ArmCandidateRow = {
   pool_address: string;
   status: string;
   funnel_status: string;
+  cycle_started_at: number;
+  updated_at: number;
 };
 
 type PoolResolutionCandidateRow = {
@@ -256,6 +323,7 @@ export function selectPoolResolutionRows(
   now: number,
   ttlSeconds: number,
   limit: number,
+  configVersionId: number,
 ): PoolResolutionCandidateRow[] {
   if (
     !Number.isSafeInteger(now) ||
@@ -263,7 +331,9 @@ export function selectPoolResolutionRows(
     !Number.isSafeInteger(ttlSeconds) ||
     ttlSeconds <= 0 ||
     !Number.isSafeInteger(limit) ||
-    limit <= 0
+    limit <= 0 ||
+    !Number.isSafeInteger(configVersionId) ||
+    configVersionId <= 0
   )
     throw new Error('Invalid pool resolution selection input');
   return database
@@ -275,7 +345,9 @@ export function selectPoolResolutionRows(
                   ORDER BY cycle_started_at DESC, id DESC
                 ) AS cycle_rank
          FROM candidates
-         WHERE chain = ? AND safety_status = 'pass' AND status != 'expired'
+         WHERE chain = ? AND config_version_id = ?
+           AND safety_status = 'pass' AND status != 'expired'
+           AND CAST(json_extract(safety_json, '$.expiresAt') AS INTEGER) > ?
            AND last_seen_at >= ? AND pool_address IS NULL
            AND (pool_retry_at IS NULL OR pool_retry_at <= ?)
        )
@@ -283,37 +355,71 @@ export function selectPoolResolutionRows(
        FROM current_cycles WHERE cycle_rank = 1
        ORDER BY updated_at ASC, id ASC LIMIT ?`,
     )
-    .all(chain, now - ttlSeconds * 1000, now, limit) as PoolResolutionCandidateRow[];
+    .all(
+      chain,
+      configVersionId,
+      now,
+      now - ttlSeconds * 1000,
+      now,
+      limit,
+    ) as PoolResolutionCandidateRow[];
 }
 
-export function selectArmCandidateRows(database: SqliteDatabase, limit: number): ArmCandidateRow[] {
-  if (!Number.isSafeInteger(limit) || limit <= 0) throw new Error('Invalid G2 candidate limit');
+export function selectArmCandidateRows(
+  database: SqliteDatabase,
+  limit: number,
+  configVersionId: number,
+  now: number,
+  ttlSeconds: Record<'sol' | 'bsc', number>,
+): ArmCandidateRow[] {
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit <= 0 ||
+    !Number.isSafeInteger(configVersionId) ||
+    configVersionId <= 0 ||
+    !Number.isSafeInteger(now) ||
+    now < 0
+  )
+    throw new Error('Invalid G2 candidate limit');
   return database
     .prepare(
       `WITH current_cycles AS (
-         SELECT id, chain, token_address, pool_address, status, funnel_status, updated_at,
+         SELECT id, chain, token_address, pool_address, cycle_started_at, status, funnel_status, updated_at,
                 ROW_NUMBER() OVER (
                   PARTITION BY chain, token_address
                   ORDER BY cycle_started_at DESC, id DESC
                 ) AS cycle_rank
          FROM candidates
-         WHERE safety_status = 'pass' AND status != 'expired' AND pool_address IS NOT NULL
-           AND (funnel_status = 'level1_checked' OR status = 'armed')
+         WHERE config_version_id = ? AND safety_status = 'pass' AND status != 'expired'
+           AND pool_address IS NOT NULL
+           AND (status IN ('armed', 'confirmed-pending-anchor', 'delivered')
+                OR CAST(json_extract(safety_json, '$.expiresAt') AS INTEGER) > ?)
+           AND (status IN ('armed', 'confirmed-pending-anchor', 'delivered')
+                OR last_seen_at >= CASE chain WHEN 'sol' THEN ? ELSE ? END)
+           AND (funnel_status IN ('level1_screened', 'level1_checked', 'armed', 'confirmed-pending-anchor')
+                OR status IN ('armed', 'confirmed-pending-anchor', 'delivered'))
        ), ranked AS (
-         SELECT id, chain, token_address, pool_address, status, funnel_status,
+         SELECT id, chain, token_address, pool_address, cycle_started_at, status, funnel_status, updated_at,
                 ROW_NUMBER() OVER (
                   PARTITION BY chain
-                  ORDER BY CASE WHEN status = 'armed' THEN 1 ELSE 0 END DESC,
+                  ORDER BY CASE WHEN status IN ('armed', 'confirmed-pending-anchor', 'delivered')
+                                THEN 1 ELSE 0 END DESC,
                            updated_at DESC, pool_address ASC, token_address ASC
                 ) AS chain_rank
          FROM current_cycles WHERE cycle_rank = 1
        )
-       SELECT id, chain, token_address, pool_address, status, funnel_status
+       SELECT id, chain, token_address, pool_address, status, funnel_status, cycle_started_at, updated_at
        FROM ranked
        ORDER BY chain_rank ASC, chain ASC
        LIMIT ?`,
     )
-    .all(limit) as ArmCandidateRow[];
+    .all(
+      configVersionId,
+      now,
+      now - ttlSeconds.sol * 1000,
+      now - ttlSeconds.bsc * 1000,
+      limit,
+    ) as ArmCandidateRow[];
 }
 
 type ExpiredCandidateIdentity = {
@@ -329,12 +435,7 @@ export function expireStaleCandidateRows(
   ttlSeconds: number,
   budget: WriteBudget,
 ): ExpiredCandidateIdentity[] {
-  if (
-    !Number.isSafeInteger(now) ||
-    now < 0 ||
-    !Number.isSafeInteger(ttlSeconds) ||
-    ttlSeconds <= 0
-  )
+  if (!Number.isSafeInteger(now) || now < 0 || !Number.isSafeInteger(ttlSeconds) || ttlSeconds <= 0)
     throw new Error('Invalid candidate expiration input');
   const cutoff = now - ttlSeconds * 1000;
   const rows = database
@@ -346,10 +447,10 @@ export function expireStaleCandidateRows(
        ORDER BY last_seen_at ASC, id ASC LIMIT ?`,
     )
     .all(chain, cutoff, budget.maxRows) as Array<{
-      id: number;
-      token_address: string;
-      pool_address: string | null;
-    }>;
+    id: number;
+    token_address: string;
+    pool_address: string | null;
+  }>;
   if (rows.length === 0) return [];
   boundedWrite(database, budget, (context) => {
     const update = database.prepare(
@@ -384,7 +485,15 @@ export class ProviderProbe {
   private level1: ProbeState = 'unknown';
   private readonly level1Snapshots = new Map<string, Level1Snapshot>();
   private readonly previousLevel1Snapshots = new Map<string, Level1Snapshot>();
+  private readonly level1ScreeningSnapshots = new Map<string, Level1ScreeningSnapshot>();
   private readonly level1Pools = new Map<string, CanonicalPool>();
+  private readonly coinGeckoScheduler: CoinGeckoRestScheduler;
+  private readonly level1BatchCache = new FreshSingleFlightCache<{
+    parsed: Record<string, unknown>;
+    observedAt: number;
+  }>();
+  private readonly finalistReservations: FinalistReservationBook;
+  private readonly finalistWaitingSince = new Map<string, number>();
   private readonly g2Queue: G2IngestQueue<PendingG2>;
   private readonly g2Deduper = new TradeDeduper();
   private g2Client: CoinGeckoG2Client | undefined;
@@ -394,6 +503,7 @@ export class ProviderProbe {
   private readonly signalCheckTimers = new Map<string, NodeJS.Timeout>();
   private readonly signalBlockLogKeys = new Set<string>();
   private readonly confirmationRefreshAttempted = new Set<string>();
+  private readonly schedulerDecisionKeys = new Set<string>();
   private readonly confirmationRefreshes = new Set<Promise<void>>();
   private readonly outcomePollAt = new Map<string, number>();
   private gmgnRequestTail: Promise<void> = Promise.resolve();
@@ -402,12 +512,20 @@ export class ProviderProbe {
   private lastProbeAt: number | undefined;
   private lastError: string | undefined;
   private timer: NodeJS.Timeout | undefined;
+  private coinGeckoTimer: NodeJS.Timeout | undefined;
   private inFlight: Promise<void> | undefined;
+  private coinGeckoInFlight: Promise<void> | undefined;
+  private lastCoinGeckoKeyAt: number | undefined;
+  private lastCoinGeckoKeyAttemptAt: number | undefined;
   private stopping = false;
   private statusChangeListener: (() => void) | undefined;
   private readonly trackers: Record<'sol' | 'bsc', CandidateCycleTracker>;
 
   public constructor(private readonly options: ProviderProbeOptions) {
+    this.coinGeckoScheduler = new CoinGeckoRestScheduler(options.config.providers.coingecko);
+    this.finalistReservations = new FinalistReservationBook(
+      options.config.providers.coingecko.g2.max_subscriptions_per_socket,
+    );
     this.trackers = {
       sol: new CandidateCycleTracker(options.config.chains.sol.discovery.candidate_ttl_seconds),
       bsc: new CandidateCycleTracker(options.config.chains.bsc.discovery.candidate_ttl_seconds),
@@ -440,6 +558,10 @@ export class ProviderProbe {
         this.options.config.chains.bsc.discovery.poll_interval_seconds,
       ) * 1000;
     this.timer = setInterval(() => void this.runOnce(), intervalMs);
+    this.coinGeckoTimer = setInterval(
+      () => this.startCoinGeckoProbe(),
+      this.options.config.providers.coingecko.scheduler.dynamic_recheck_seconds * 1000,
+    );
     void this.runOnce();
   }
 
@@ -447,17 +569,42 @@ export class ProviderProbe {
     this.stopping = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    if (this.coinGeckoTimer) clearInterval(this.coinGeckoTimer);
+    this.coinGeckoTimer = undefined;
     for (const timer of this.signalCheckTimers.values()) clearTimeout(timer);
     this.signalCheckTimers.clear();
     this.outcomePollAt.clear();
     await this.inFlight;
+    await this.coinGeckoScheduler.stop();
+    await this.coinGeckoInFlight;
     await this.g2DrainInFlight;
+    this.finalistReservations.clearReservations();
+    this.finalistWaitingSince.clear();
     await this.g2Client?.stop();
     await Promise.allSettled([...this.confirmationRefreshes]);
   }
 
   public status(): ProviderProbeStatus {
     const providerStates = [this.gmgn, this.coingecko];
+    const scheduler = this.coinGeckoScheduler.stats();
+    const now = Date.now();
+    const persisted = this.options.database
+      .prepare(
+        `SELECT COUNT(*) AS count, MIN(updated_at) AS oldest_at FROM candidates
+         WHERE config_version_id = ? AND safety_status = 'pass' AND status != 'expired'
+           AND pool_address IS NOT NULL
+           AND (status IN ('armed', 'confirmed-pending-anchor', 'delivered')
+                OR CAST(json_extract(safety_json, '$.expiresAt') AS INTEGER) > ?)
+           AND (status IN ('armed', 'confirmed-pending-anchor', 'delivered')
+                OR last_seen_at >= CASE chain WHEN 'sol' THEN ? ELSE ? END)`,
+      )
+      .get(
+        this.options.configVersionId,
+        now,
+        now - this.options.config.chains.sol.discovery.candidate_ttl_seconds * 1000,
+        now - this.options.config.chains.bsc.discovery.candidate_ttl_seconds * 1000,
+      ) as { count: number; oldest_at: number | null };
+    const persistedDue = Number(persisted.count);
     return {
       provider: providerStates.every((state) => state === 'ok')
         ? 'ok'
@@ -470,6 +617,33 @@ export class ProviderProbe {
       telegram: this.telegram,
       g2QueueSize: this.g2Queue.size(),
       g2QueueHighWater: this.g2Queue.atHighWatermark(),
+      scheduler: {
+        queued: scheduler.queued,
+        running: scheduler.running,
+        oldestWaitMs: scheduler.oldestWaitMs,
+        byKind: scheduler.byKind,
+        effectiveRpm: scheduler.effectiveRpm,
+        persistedDue,
+        persistedOldestWaitMs:
+          persisted.oldest_at === null ? 0 : Math.max(0, now - persisted.oldest_at),
+        batchConcurrency: scheduler.batchConcurrency,
+        tradeConcurrency: scheduler.tradeConcurrency,
+        creditDeferred: scheduler.creditDeferred,
+        ...(scheduler.remainingCredits === undefined
+          ? {}
+          : { remainingCredits: scheduler.remainingCredits }),
+        ...(scheduler.burnCreditsPerHour === undefined
+          ? {}
+          : { burnCreditsPerHour: scheduler.burnCreditsPerHour }),
+        ...(scheduler.projectedExhaustionAt === undefined
+          ? {}
+          : { projectedExhaustionAt: scheduler.projectedExhaustionAt }),
+        completed: scheduler.completed,
+        failed: scheduler.failed,
+        rejected: scheduler.rejected,
+        lastQueueWaitMs: scheduler.lastQueueWaitMs,
+        lastRunLatencyMs: scheduler.lastRunLatencyMs,
+      },
       ...(this.lastProbeAt === undefined ? {} : { lastProbeAt: this.lastProbeAt }),
       ...(this.lastError === undefined ? {} : { lastError: this.lastError }),
     };
@@ -550,15 +724,11 @@ export class ProviderProbe {
   private async runOnce(): Promise<void> {
     if (this.stopping || this.inFlight) return;
     this.inFlight = Promise.allSettled([this.probeGmgn(), this.probeTelegram()])
-      .then(async (results) => {
+      .then((results) => {
         const failures = results
           .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
           .map((result) => this.safeError(result.reason));
-        try {
-          await this.probeCoinGecko();
-        } catch (error) {
-          failures.push(this.safeError(error));
-        }
+        this.startCoinGeckoProbe();
         return failures;
       })
       .then((results) => {
@@ -578,6 +748,20 @@ export class ProviderProbe {
     await this.inFlight;
   }
 
+  private startCoinGeckoProbe(): void {
+    if (this.stopping || this.coinGeckoInFlight) return;
+    this.coinGeckoInFlight = this.probeCoinGecko()
+      .catch((error: unknown) => {
+        this.lastError = this.safeError(error);
+        this.options.logger('warn', 'coingecko_probe_failed', { error: this.lastError });
+      })
+      .finally(() => {
+        this.lastProbeAt = Date.now();
+        this.statusChangeListener?.();
+        this.coinGeckoInFlight = undefined;
+      });
+  }
+
   private async probeGmgn(): Promise<void> {
     try {
       const disk = readDiskHealth(
@@ -588,18 +772,16 @@ export class ProviderProbe {
       for (const chain of ['sol', 'bsc'] as const) {
         const intervals = this.options.config.chains[chain].discovery.trending_intervals;
         for (const interval of intervals) {
-          const raw = await this.requestGmgn(
-            [
-              'market',
-              'trending',
-              '--chain',
-              chain,
-              '--interval',
-              interval,
-              '--limit',
-              String(this.options.config.chains[chain].discovery.max_candidates),
-            ],
-          );
+          const raw = await this.requestGmgn([
+            'market',
+            'trending',
+            '--chain',
+            chain,
+            '--interval',
+            interval,
+            '--limit',
+            String(this.options.config.chains[chain].discovery.max_candidates),
+          ]);
           const observedAt = Date.now();
           const parsed = gmgnTrendingRawSchema.parse(JSON.parse(raw));
           const event = this.recordGmgnEvent(raw, `market.trending.${interval}`, chain, observedAt);
@@ -607,18 +789,16 @@ export class ProviderProbe {
           await delay(this.options.config.providers.gmgn.rate_limit.minimum_interval_ms);
         }
 
-        const raw = await this.requestGmgn(
-          [
-            'market',
-            'hot-searches',
-            '--chain',
-            chain,
-            '--interval',
-            this.options.config.chains[chain].discovery.hot_search_interval,
-            '--limit',
-            String(this.options.config.chains[chain].discovery.max_candidates),
-          ],
-        );
+        const raw = await this.requestGmgn([
+          'market',
+          'hot-searches',
+          '--chain',
+          chain,
+          '--interval',
+          this.options.config.chains[chain].discovery.hot_search_interval,
+          '--limit',
+          String(this.options.config.chains[chain].discovery.max_candidates),
+        ]);
         const observedAt = Date.now();
         const parsed = gmgnHotSearchesRawSchema.parse(JSON.parse(raw));
         const event = this.recordGmgnEvent(raw, 'market.hot-searches.1m', chain, observedAt);
@@ -670,11 +850,7 @@ export class ProviderProbe {
       const remaining = minimumInterval - (Date.now() - this.lastGmgnRequestAt);
       if (remaining > 0) await delay(remaining);
       try {
-        return await runGmgn(
-          args,
-          key,
-          this.options.config.providers.gmgn.request_timeout_ms,
-        );
+        return await runGmgn(args, key, this.options.config.providers.gmgn.request_timeout_ms);
       } finally {
         this.lastGmgnRequestAt = Date.now();
       }
@@ -750,8 +926,7 @@ export class ProviderProbe {
           observation.chain,
           observation.tokenAddress,
           observation.observedAt -
-            this.options.config.chains[observation.chain].discovery.candidate_ttl_seconds *
-              1000,
+            this.options.config.chains[observation.chain].discovery.candidate_ttl_seconds * 1000,
         ) as
         | {
             cycle_started_at: number;
@@ -809,7 +984,7 @@ export class ProviderProbe {
         } else {
           const info = this.options.database
             .prepare(
-          `UPDATE candidates SET last_seen_at = ?,
+              `UPDATE candidates SET last_seen_at = ?,
                status = CASE WHEN status IN ('armed', 'confirmed-pending-anchor', 'delivered', 'completed')
                              THEN status ELSE ? END,
                safety_status = ?, safety_json = ?, config_version_id = ?,
@@ -881,8 +1056,7 @@ export class ProviderProbe {
          WHERE chain = ? AND token_address = ? AND cycle_started_at = ?`,
       )
       .get(cycle.chain, cycle.tokenAddress, cycle.cycleStartedAt) as
-      | { pool_address: string | null }
-      | undefined;
+      { pool_address: string | null } | undefined;
     boundedWrite(this.options.database, this.options.writeBudget, (context) => {
       const info = this.options.database
         .prepare(
@@ -914,39 +1088,163 @@ export class ProviderProbe {
     this.g2Client?.unset(`${identity.chain}:${identity.poolAddress}:${identity.tokenAddress}`);
   }
 
+  private async scheduleCoinGeckoRequest<T>(work: CoinGeckoWork<T>): Promise<T> {
+    return this.coinGeckoScheduler.enqueue({
+      ...work,
+      run: async (signal) => {
+        try {
+          return await work.run(signal);
+        } catch (error) {
+          if (error instanceof ProviderRequestError && error.diagnostic.status === 429)
+            this.coinGeckoScheduler.recordRateLimit(error.diagnostic.retryAfterMs);
+          throw error;
+        }
+      },
+    });
+  }
+
+  private recordSchedulerDecision(input: {
+    decision: string;
+    reason: string;
+    priority: string;
+    chain?: 'sol' | 'bsc';
+    tokenAddress?: string;
+    poolAddress?: string;
+    cycleStartedAt?: number;
+    workKey?: string;
+    candidates?: Array<{
+      tokenAddress: string;
+      poolAddress: string;
+      cycleStartedAt: number;
+    }>;
+    dedupeKey?: string;
+  }): void {
+    if (input.dedupeKey) {
+      if (this.schedulerDecisionKeys.has(input.dedupeKey)) return;
+      if (this.schedulerDecisionKeys.size >= 20_000) this.schedulerDecisionKeys.clear();
+      this.schedulerDecisionKeys.add(input.dedupeKey);
+    }
+    const observedAt = Date.now();
+    const payload = JSON.stringify({
+      decision: input.decision,
+      reason: input.reason,
+      priority: input.priority,
+      eventTime: observedAt,
+      evidenceCutoffAt: observedAt,
+      configVersionId: String(this.options.configVersionId),
+      ...(input.cycleStartedAt === undefined ? {} : { cycleStartedAt: input.cycleStartedAt }),
+      ...(input.workKey === undefined ? {} : { workKey: input.workKey }),
+      ...(input.candidates === undefined ? {} : { candidates: input.candidates }),
+    });
+    insertProviderEvent(
+      this.options.database,
+      {
+        provider: 'runtime',
+        capability: 'scheduler.decision',
+        ...(input.chain === undefined ? {} : { chain: input.chain }),
+        ...(input.tokenAddress === undefined ? {} : { tokenAddress: input.tokenAddress }),
+        ...(input.poolAddress === undefined ? {} : { poolAddress: input.poolAddress }),
+        eventAt: observedAt,
+        observedAt,
+        schemaVersion: 'runtime.scheduler.decision.v1',
+        payload,
+      },
+      this.options.writeBudget,
+    );
+  }
+
   private async probeCoinGecko(): Promise<void> {
     const key = this.options.secrets[this.options.config.providers.coingecko.api_key_env];
     if (!key) throw new Error('CoinGecko secret is not configured');
     const options = httpOptions(this.options.config, 'coingecko', 'key');
     try {
-      const result = await requestJson<Record<string, unknown>>(
-        `${this.options.config.providers.coingecko.rest_base_url}/key`,
-        { headers: { 'x-cg-pro-api-key': key } },
-        options,
+      const now = Date.now();
+      if (
+        this.lastCoinGeckoKeyAttemptAt === undefined ||
+        now - this.lastCoinGeckoKeyAttemptAt >=
+          this.options.config.providers.coingecko.scheduler.key_refresh_seconds * 1000
+      ) {
+        this.lastCoinGeckoKeyAttemptAt = now;
+        try {
+          const result = await this.scheduleCoinGeckoRequest({
+            key: 'key.account',
+            kind: 'confirmation',
+            requestType: 'batch',
+            createdAt: now,
+            run: (signal) =>
+              requestJson<Record<string, unknown>>(
+                `${this.options.config.providers.coingecko.rest_base_url}/key`,
+                { headers: { 'x-cg-pro-api-key': key }, signal },
+                options,
+              ),
+          });
+          const observedAt = Date.now();
+          const payload = JSON.stringify(result.data);
+          const providerRpm = result.data.api_key_rate_limit_request_per_minute;
+          if (
+            typeof providerRpm === 'number' &&
+            Number.isSafeInteger(providerRpm) &&
+            providerRpm > 0
+          )
+            this.coinGeckoScheduler.setProviderRpm(providerRpm);
+          const providerMonthlyCredits = result.data.api_key_monthly_call_credit;
+          const providerCreditsUsed = result.data.api_key_current_total_monthly_calls;
+          if (
+            typeof providerMonthlyCredits === 'number' &&
+            typeof providerCreditsUsed === 'number' &&
+            Number.isSafeInteger(providerMonthlyCredits) &&
+            Number.isSafeInteger(providerCreditsUsed)
+          )
+            this.coinGeckoScheduler.setProviderCreditState(
+              providerMonthlyCredits,
+              providerCreditsUsed,
+              observedAt,
+            );
+          insertProviderEvent(
+            this.options.database,
+            {
+              provider: 'coingecko',
+              capability: 'key',
+              observedAt,
+              schemaVersion: 'coingecko.key.v1',
+              payload,
+              requestMeta: {
+                endpoint_name: 'key',
+                method: 'GET',
+                status: result.diagnostic.status,
+                response_bytes: Buffer.byteLength(payload),
+              },
+            },
+            this.options.writeBudget,
+          );
+          this.lastCoinGeckoKeyAt = observedAt;
+        } catch (error) {
+          this.options.logger('warn', 'coingecko_key_refresh_failed', {
+            error: this.safeError(error),
+            last_success_at: this.lastCoinGeckoKeyAt,
+          });
+        }
+      }
+      await delay(this.options.config.providers.coingecko.scheduler.merge_delay_ms);
+      const resolutionErrors = await this.resolveCoinGeckoPools(key);
+      const outcomes = this.processOutcomes(key).then(
+        () => ({ status: 'fulfilled' as const }),
+        (reason: unknown) => ({ status: 'rejected' as const, reason }),
       );
-      const observedAt = Date.now();
-      const payload = JSON.stringify(result.data);
-      insertProviderEvent(
-        this.options.database,
-        {
-          provider: 'coingecko',
-          capability: 'key',
-          observedAt,
-          schemaVersion: 'coingecko.key.v1',
-          payload,
-          requestMeta: {
-            endpoint_name: 'key',
-            method: 'GET',
-            status: result.diagnostic.status,
-            response_bytes: Buffer.byteLength(payload),
-          },
-        },
-        this.options.writeBudget,
+      let pipelineError: unknown;
+      try {
+        await this.refreshLevel1(key);
+        await this.armEligibleCandidates(key);
+      } catch (error) {
+        pipelineError = error;
+      }
+      const outcomeResult = await outcomes;
+      if (pipelineError) throw pipelineError;
+      if (outcomeResult.status === 'rejected') throw outcomeResult.reason;
+      const hardResolutionError = resolutionErrors.find(
+        (error) => !this.safeError(error).startsWith('scheduler:'),
       );
-      await this.resolveCoinGeckoPools(key);
-      await this.refreshLevel1(key);
-      await this.armEligibleCandidates(key);
-      await this.processOutcomes(key);
+      if (hardResolutionError) throw hardResolutionError;
       this.coingecko = 'ok';
     } catch (error) {
       this.coingecko = 'failed';
@@ -957,174 +1255,294 @@ export class ProviderProbe {
   private async refreshLevel1(key: string): Promise<void> {
     const rows = selectLevel1CandidateRows(
       this.options.database,
-      this.options.config.providers.coingecko.max_pools_per_batch,
+      this.options.config.providers.coingecko.scheduler.max_due_pools_per_chain,
+      this.options.configVersionId,
+      Date.now(),
+      {
+        sol: this.options.config.chains.sol.discovery.candidate_ttl_seconds,
+        bsc: this.options.config.chains.bsc.discovery.candidate_ttl_seconds,
+      },
     );
-    let attempted = 0;
-    let complete = 0;
+    const batchJobs: Array<{
+      expected: number;
+      promise: Promise<{ attempted: number; complete: number }>;
+    }> = [];
     for (const chain of ['sol', 'bsc'] as const) {
-      let baselineInMemory = 0;
-      let baselineRestored = 0;
-      let baselineMissing = 0;
-      const chainRows = rows
-        .filter((row) => row.chain === chain)
-        .slice(0, this.options.config.providers.coingecko.max_pools_per_batch);
-      const poolRows = dedupePools(chainRows);
-      if (poolRows.length === 0) continue;
-      const network = chain === 'sol' ? 'solana' : 'bsc';
-      const addresses = poolRows.map((row) => row.pool_address);
-      const url = `${this.options.config.providers.coingecko.rest_base_url}/onchain/networks/${network}/pools/multi/${addresses.map(encodeURIComponent).join(',')}?include=base_token,quote_token&include_volume_breakdown=true&include_composition=true`;
-      assertAnalystEndpoint(url, this.options.config.providers.coingecko.rest_base_url);
-      const result = await requestJson<Record<string, unknown>>(
-        url,
-        { headers: { 'x-cg-pro-api-key': key } },
-        httpOptions(this.options.config, 'coingecko', 'pools.multi.level1'),
-      );
-      const parsed = coingeckoPoolBatchRawSchema.parse(result.data);
-      const observedAt = Date.now();
-      insertProviderEvent(
-        this.options.database,
-        {
-          provider: 'coingecko',
-          capability: 'pools.multi.level1',
-          chain,
-          observedAt,
-          schemaVersion: 'coingecko.pools.multi.v1',
-          payload: JSON.stringify(parsed),
-          billingBucket: 'pool_screening',
-          requestMeta: {
-            endpoint_name: 'onchain.pools.multi',
-            method: 'GET',
-            status: result.diagnostic.status,
-            response_bytes: Buffer.byteLength(JSON.stringify(parsed)),
-          },
-        },
-        this.options.writeBudget,
-      );
-      for (const row of poolRows) {
-        const raw = poolRawForAddress(parsed, network, row.pool_address, row.token_address);
-        if (!raw) {
-          attempted += 1;
-          continue;
-        }
-        const parsedPool = parsePool(raw, chain, row.token_address);
-        if (parsedPool.status !== 'complete') {
-          attempted += 1;
-          continue;
-        }
-        const tradeUrl = `${this.options.config.providers.coingecko.rest_base_url}/onchain/networks/${network}/pools/${encodeURIComponent(row.pool_address)}/trades`;
-        assertAnalystEndpoint(tradeUrl, this.options.config.providers.coingecko.rest_base_url);
-        const tradeResult = await requestJson<Record<string, unknown>>(
-          tradeUrl,
-          { headers: { 'x-cg-pro-api-key': key } },
-          httpOptions(this.options.config, 'coingecko', 'trades.level1'),
-        );
-        const tradePayload = coingeckoTradesRawSchema.parse(tradeResult.data);
-        const tradeObservedAt = Date.now();
-        insertProviderEvent(
-          this.options.database,
-          {
-            provider: 'coingecko',
-            capability: 'trades.level1',
-            chain,
-            tokenAddress: row.token_address,
-            poolAddress: row.pool_address,
-            observedAt: tradeObservedAt,
-            schemaVersion: 'coingecko.trades.v1',
-            payload: JSON.stringify(tradePayload),
-            billingBucket: 'pool_screening',
-            requestMeta: {
-              endpoint_name: 'onchain.pools.trades',
-              method: 'GET',
-              status: tradeResult.diagnostic.status,
-              response_bytes: Buffer.byteLength(JSON.stringify(tradePayload)),
-            },
-          },
-          this.options.writeBudget,
-        );
-        attempted += 1;
-        const level1ObservedAt = latestLevel1ObservedAt(observedAt, tradeObservedAt);
-        const level1 = parseLevel1Snapshot(
-          level1RawForPool(
-            raw,
-            parsedPool.pool,
-            findPoolAttributes(parsed, network, row.pool_address),
-            level1ObservedAt,
-            latestTradeAt(tradePayload),
-          ),
-          parsedPool.pool,
-          level1ObservedAt,
-        );
-        if (level1.status !== 'complete') continue;
-        complete += 1;
-        const inMemoryPrevious = this.level1Snapshots.get(parsedPool.pool.identityKey);
-        const previous =
-          inMemoryPrevious ??
-          this.restorePreviousLevel1Snapshot(chain, row, parsedPool.pool, observedAt);
-        if (inMemoryPrevious) baselineInMemory += 1;
-        else if (previous) baselineRestored += 1;
-        else baselineMissing += 1;
-        if (previous) this.previousLevel1Snapshots.set(parsedPool.pool.identityKey, previous);
-        this.level1Snapshots.set(parsedPool.pool.identityKey, level1.snapshot);
-        this.level1Pools.set(`${chain}:${row.pool_address}:${row.token_address}`, parsedPool.pool);
-        boundedWrite(this.options.database, this.options.writeBudget, (context) => {
-          const info = this.options.database
-            .prepare(
-              `UPDATE candidates SET funnel_status = 'level1_checked', updated_at = ?
-               WHERE id = ? AND chain = ? AND token_address = ? AND pool_address = ?
-                 AND safety_status = 'pass'
-                 AND funnel_status != 'armed'`,
-            )
-            .run(observedAt, row.id, chain, row.token_address, row.pool_address);
-          context.addRows(info.changes);
+      const chainRows = rows.filter((row) => row.chain === chain);
+      for (const candidateRows of createCandidatePoolBatches(
+        chainRows,
+        chain,
+        this.options.config.providers.coingecko.max_pools_per_batch,
+      )) {
+        batchJobs.push({
+          expected: candidateRows.length,
+          promise: this.refreshLevel1Batch(key, chain, candidateRows),
         });
       }
-      this.options.logger('info', 'level1_baseline_status', {
-        chain,
-        baseline_in_memory: baselineInMemory,
-        baseline_restored: baselineRestored,
-        baseline_missing: baselineMissing,
-      });
-      await delay(60_000 / this.options.config.providers.coingecko.rest_requests_per_minute);
     }
+    const results = await Promise.allSettled(batchJobs.map((job) => job.promise));
+    const summary = summarizeLevel1BatchResults(
+      batchJobs.map((job) => job.expected),
+      results,
+    );
+    const { attempted, complete, failures } = summary;
     this.level1 = level1ProbeState(attempted, complete);
-    this.options.logger(this.level1 === 'ok' ? 'info' : 'warn', 'level1_probe_summary', {
-      attempted,
-      complete,
-      incomplete: attempted - complete,
-      status: this.level1,
+    this.options.logger(
+      this.level1 === 'ok' && failures === 0 ? 'info' : 'warn',
+      'level1_probe_summary',
+      {
+        attempted,
+        complete,
+        incomplete: attempted - complete,
+        batch_failures: failures,
+        scheduler: this.coinGeckoScheduler.stats(),
+        status: this.level1,
+      },
+    );
+  }
+
+  private async refreshLevel1Batch(
+    key: string,
+    chain: 'sol' | 'bsc',
+    poolRows: Level1CandidateRow[],
+  ): Promise<{ attempted: number; complete: number }> {
+    const network = chain === 'sol' ? 'solana' : 'bsc';
+    const addresses = [
+      ...new Map(
+        poolRows.map((row) => [
+          chain === 'bsc' ? row.pool_address.toLowerCase() : row.pool_address,
+          row.pool_address,
+        ]),
+      ).values(),
+    ];
+    const cacheKey = `${chain}:${[...addresses]
+      .map((address) => (chain === 'bsc' ? address.toLowerCase() : address))
+      .sort()
+      .join(',')}`;
+    const requestedAt = Date.now();
+    const activeStatuses = new Set(['armed', 'confirmed-pending-anchor', 'delivered']);
+    const containsNewCandidate = poolRows.some(
+      (row) =>
+        !activeStatuses.has(row.status) &&
+        !['level1_screened', 'level1_checked'].includes(row.funnel_status),
+    );
+    const workKind = containsNewCandidate
+      ? 'candidate_batch'
+      : poolRows.some((row) => activeStatuses.has(row.status))
+        ? 'armed_batch'
+        : 'recheck';
+    let supplierRequestStarted = false;
+    const { parsed, observedAt } = await this.level1BatchCache
+      .getOrLoad(
+        cacheKey,
+        requestedAt,
+        this.options.config.providers.coingecko.scheduler.cache_ttl_seconds * 1000,
+        () => {
+          supplierRequestStarted = true;
+          return this.scheduleCoinGeckoRequest({
+            key: `pools.multi:${cacheKey}`,
+            kind: workKind,
+            requestType: 'batch',
+            chain,
+            createdAt: Math.min(...poolRows.map((row) => row.updated_at)),
+            run: async (signal) => {
+              const url = `${this.options.config.providers.coingecko.rest_base_url}/onchain/networks/${network}/pools/multi/${addresses.map(encodeURIComponent).join(',')}?include=base_token,quote_token&include_volume_breakdown=true&include_composition=true`;
+              assertAnalystEndpoint(url, this.options.config.providers.coingecko.rest_base_url);
+              const result = await requestJson<Record<string, unknown>>(
+                url,
+                { headers: { 'x-cg-pro-api-key': key }, signal },
+                httpOptions(this.options.config, 'coingecko', 'pools.multi.level1'),
+              );
+              const batch = coingeckoPoolBatchRawSchema.parse(result.data) as Record<
+                string,
+                unknown
+              >;
+              const at = Date.now();
+              const payload = JSON.stringify(batch);
+              insertProviderEvent(
+                this.options.database,
+                {
+                  provider: 'coingecko',
+                  capability: 'pools.multi.level1',
+                  chain,
+                  observedAt: at,
+                  schemaVersion: 'coingecko.pools.multi.v1',
+                  payload,
+                  billingBucket: 'pool_screening',
+                  requestMeta: {
+                    endpoint_name: 'onchain.pools.multi',
+                    method: 'GET',
+                    status: result.diagnostic.status,
+                    response_bytes: Buffer.byteLength(payload),
+                  },
+                },
+                this.options.writeBudget,
+              );
+              return { parsed: batch, observedAt: at };
+            },
+          });
+        },
+      )
+      .catch((error: unknown) => {
+        this.touchLevel1CandidateRows(poolRows, Date.now());
+        if (supplierRequestStarted)
+          this.recordSchedulerDecision({
+            decision: 'defer',
+            reason: this.safeError(error),
+            priority: workKind,
+            chain,
+            workKey: `pools.multi:${cacheKey}`,
+            candidates: poolRows.map((row) => ({
+              tokenAddress: row.token_address,
+              poolAddress: row.pool_address,
+              cycleStartedAt: row.cycle_started_at,
+            })),
+          });
+        throw error;
+      });
+
+    this.touchLevel1CandidateRows(poolRows, observedAt);
+    if (supplierRequestStarted)
+      this.recordSchedulerDecision({
+        decision: 'complete',
+        reason: 'supplier_response_persisted',
+        priority: workKind,
+        chain,
+        workKey: `pools.multi:${cacheKey}`,
+        candidates: poolRows.map((row) => ({
+          tokenAddress: row.token_address,
+          poolAddress: row.pool_address,
+          cycleStartedAt: row.cycle_started_at,
+        })),
+      });
+
+    let complete = 0;
+    for (const row of poolRows) {
+      const raw = poolRawForAddress(parsed, network, row.pool_address, row.token_address);
+      if (!raw) continue;
+      const parsedPool = parsePool(raw, chain, row.token_address);
+      if (parsedPool.status !== 'complete') continue;
+      const screening = parseLevel1ScreeningSnapshot(
+        level1ScreeningRawForPool(
+          raw,
+          parsedPool.pool,
+          findPoolAttributes(parsed, network, row.pool_address),
+        ),
+        parsedPool.pool,
+        observedAt,
+      );
+      if (screening.status !== 'complete') continue;
+      complete += 1;
+      const waitingKey = finalistKey({
+        chain,
+        tokenAddress: row.token_address,
+        poolAddress: row.pool_address,
+        cycleStartedAt: row.cycle_started_at,
+      });
+      if (this.finalistWaitingSince.size >= 20_000) this.finalistWaitingSince.clear();
+      if (!this.finalistWaitingSince.has(waitingKey))
+        this.finalistWaitingSince.set(waitingKey, row.updated_at);
+      this.level1ScreeningSnapshots.set(parsedPool.pool.identityKey, screening.snapshot);
+      this.level1Pools.set(`${chain}:${row.pool_address}:${row.token_address}`, parsedPool.pool);
+      const lastTrade = this.latestStoredTradeEvidence(row);
+      if (lastTrade) {
+        const promoted = promoteLevel1ScreeningSnapshot(screening.snapshot, lastTrade);
+        if (promoted.status === 'complete') {
+          const previous = this.level1Snapshots.get(parsedPool.pool.identityKey);
+          if (previous) this.previousLevel1Snapshots.set(parsedPool.pool.identityKey, previous);
+          this.level1Snapshots.set(parsedPool.pool.identityKey, promoted.snapshot);
+        }
+      }
+      boundedWrite(this.options.database, this.options.writeBudget, (context) => {
+        const info = this.options.database
+          .prepare(
+            `UPDATE candidates
+             SET funnel_status = CASE WHEN status = 'armed' THEN funnel_status ELSE 'level1_screened' END
+             WHERE id = ? AND chain = ? AND token_address = ? AND pool_address = ?
+               AND safety_status = 'pass' AND status != 'expired'`,
+          )
+          .run(row.id, chain, row.token_address, row.pool_address);
+        context.addRows(info.changes);
+      });
+    }
+    return { attempted: poolRows.length, complete };
+  }
+
+  private touchLevel1CandidateRows(rows: Level1CandidateRow[], at: number): void {
+    boundedWrite(this.options.database, this.options.writeBudget, (context) => {
+      const update = this.options.database.prepare(
+        `UPDATE candidates SET updated_at = ?
+         WHERE id = ? AND cycle_started_at = ? AND config_version_id = ?
+           AND safety_status = 'pass' AND status != 'expired'`,
+      );
+      for (const row of rows)
+        context.addRows(
+          update.run(at, row.id, row.cycle_started_at, this.options.configVersionId).changes,
+        );
     });
+  }
+
+  private latestStoredTradeEvidence(row: Level1CandidateRow) {
+    const trade = this.options.database
+      .prepare(
+        `SELECT event_at, observed_at FROM trades
+         WHERE chain = ? AND pool_address = ? AND token_address = ?
+           AND dedup_status = 'unique' AND ambiguity_status = 'none'
+         ORDER BY event_at DESC, observed_at DESC LIMIT 1`,
+      )
+      .get(row.chain, row.pool_address, row.token_address) as
+      { event_at: number; observed_at: number } | undefined;
+    return trade
+      ? {
+          source: 'g2' as const,
+          chain: row.chain,
+          poolAddress: row.pool_address,
+          tokenAddress: row.token_address,
+          eventAt: trade.event_at,
+          observedAt: trade.observed_at,
+        }
+      : undefined;
   }
 
   private async armEligibleCandidates(key: string): Promise<void> {
     const rows = selectArmCandidateRows(
       this.options.database,
-      this.options.config.providers.coingecko.g2.max_subscriptions_per_socket,
+      this.options.config.providers.coingecko.scheduler.max_due_pools_per_chain * 2,
+      this.options.configVersionId,
+      Date.now(),
+      {
+        sol: this.options.config.chains.sol.discovery.candidate_ttl_seconds,
+        bsc: this.options.config.chains.bsc.discovery.candidate_ttl_seconds,
+      },
     );
-    const eligible: Array<{ row: ArmCandidateRow; pool: CanonicalPool }> = [];
+    const existingArmed: Array<{ row: ArmCandidateRow; pool: CanonicalPool }> = [];
+    const eligible: Array<{
+      row: ArmCandidateRow;
+      pool: CanonicalPool;
+      screening: Level1ScreeningSnapshot;
+    }> = [];
     for (const row of rows) {
       if (!shouldRearmG2Candidate(row.status, row.funnel_status)) continue;
       const pool = this.level1Pools.get(`${row.chain}:${row.pool_address}:${row.token_address}`);
       const cycle = this.trackers[row.chain].get(row.chain, row.token_address);
-      const snapshot = pool ? this.level1Snapshots.get(pool.identityKey) : undefined;
+      if (!pool) continue;
       if (
-        !pool ||
-        !cycle ||
-        !snapshot ||
-        !isLevel1Fresh(
-          snapshot,
-          Date.now(),
-          this.options.config.chains[row.chain].level1.buyers_freshness_seconds,
-        )
-      )
+        ['armed', 'confirmed-pending-anchor', 'delivered'].includes(row.status) ||
+        ['armed', 'confirmed-pending-anchor'].includes(row.funnel_status)
+      ) {
+        existingArmed.push({ row, pool });
         continue;
+      }
+      const screening = this.level1ScreeningSnapshots.get(pool.identityKey);
+      if (!cycle || !screening) continue;
       const attention = evaluateCandidateAttention(
         cycle.evidence,
         this.options.config.strategies.emerging_breakout.attention,
       );
       if (!canArmG2Candidate(row.status, row.funnel_status, attention.status)) continue;
-      eligible.push({ row, pool });
+      eligible.push({ row, pool, screening });
     }
-    if (eligible.length === 0) return;
+    if (eligible.length === 0 && existingArmed.length === 0) return;
     this.g2Client ??= new CoinGeckoG2Client({
       websocketUrl: this.options.config.providers.coingecko.websocket_url,
       apiKey: key,
@@ -1136,23 +1554,330 @@ export class ProviderProbe {
       onMessage: (message, observedAt) => this.recordG2Message(message, observedAt),
     });
     await this.g2Client.start();
-    const desired = new Set(eligible.map(({ pool }) => pool.identityKey));
+    const desired = new Set(existingArmed.map(({ pool }) => pool.identityKey));
     for (const identityKey of armedSubscriptionsToRelease(this.g2Client.active(), desired))
       this.g2Client.unset(identityKey);
-    for (const { row, pool } of eligible) {
-      const result = this.g2Client.request(pool, 'armed');
-      if (result === 'rejected_capacity') continue;
+    this.finalistReservations.reconcileOccupied(desired);
+    for (const { row, pool } of existingArmed) {
+      const state = row.status === 'armed' ? 'armed' : 'confirmed-pending-anchor';
+      if (state === 'confirmed-pending-anchor' && !this.g2Client.active().has(pool.identityKey))
+        this.g2Client.request(pool, 'armed');
+      this.g2Client.request(pool, state);
+    }
+
+    const finalistSortAt = Date.now();
+    const finalistMaxWaitMs =
+      this.options.config.providers.coingecko.scheduler.max_dynamic_wait_seconds * 1000;
+    eligible.sort((left, right) => {
+      const leftWaitingSince =
+        this.finalistWaitingSince.get(
+          finalistKey({
+            chain: left.row.chain,
+            tokenAddress: left.row.token_address,
+            poolAddress: left.row.pool_address,
+            cycleStartedAt: left.row.cycle_started_at,
+          }),
+        ) ?? left.row.updated_at;
+      const rightWaitingSince =
+        this.finalistWaitingSince.get(
+          finalistKey({
+            chain: right.row.chain,
+            tokenAddress: right.row.token_address,
+            poolAddress: right.row.pool_address,
+            cycleStartedAt: right.row.cycle_started_at,
+          }),
+        ) ?? right.row.updated_at;
+      const leftAged = finalistSortAt - leftWaitingSince >= finalistMaxWaitMs;
+      const rightAged = finalistSortAt - rightWaitingSince >= finalistMaxWaitMs;
+      if (leftAged !== rightAged) return leftAged ? -1 : 1;
+      const leftWindow = left.screening.windows.m5;
+      const rightWindow = right.screening.windows.m5;
+      if ((rightWindow?.buyers ?? 0) !== (leftWindow?.buyers ?? 0))
+        return (rightWindow?.buyers ?? 0) - (leftWindow?.buyers ?? 0);
+      const netBuy = new Decimal(rightWindow?.netBuyUsd ?? '0').comparedTo(
+        leftWindow?.netBuyUsd ?? '0',
+      );
+      if (netBuy !== 0) return netBuy;
+      const volume = new Decimal(rightWindow?.volumeUsd ?? '0').comparedTo(
+        leftWindow?.volumeUsd ?? '0',
+      );
+      if (volume !== 0) return volume;
+      const reserve = new Decimal(right.screening.reserveUsd).comparedTo(left.screening.reserveUsd);
+      if (reserve !== 0) return reserve;
+      if (right.screening.poolAgeSeconds !== left.screening.poolAgeSeconds)
+        return right.screening.poolAgeSeconds - left.screening.poolAgeSeconds;
+      if (leftWaitingSince !== rightWaitingSince) return leftWaitingSince - rightWaitingSince;
+      return left.pool.identityKey.localeCompare(right.pool.identityKey);
+    });
+    const initializationJobs: Array<Promise<void>> = [];
+    for (const [index, item] of eligible.entries()) {
+      const identity = {
+        chain: item.row.chain,
+        tokenAddress: item.row.token_address,
+        poolAddress: item.row.pool_address,
+        cycleStartedAt: item.row.cycle_started_at,
+      };
+      const reservation = this.finalistReservations.acquire(
+        identity,
+        Date.now(),
+        this.options.config.providers.coingecko.scheduler.reservation_ttl_seconds * 1000,
+        eligible.length - index,
+      );
+      if (reservation.status === 'rejected_capacity') {
+        this.recordSchedulerDecision({
+          decision: 'defer',
+          reason: 'finalist_capacity',
+          priority: 'candidate_batch',
+          chain: item.row.chain,
+          tokenAddress: item.row.token_address,
+          poolAddress: item.row.pool_address,
+          cycleStartedAt: item.row.cycle_started_at,
+          dedupeKey: `capacity:${finalistKey(identity)}`,
+        });
+        continue;
+      }
+      if (reservation.status === 'acquired') {
+        this.schedulerDecisionKeys.delete(`capacity:${finalistKey(identity)}`);
+        this.recordSchedulerDecision({
+          decision: 'reservation_acquired',
+          reason: 'attention_structure_capacity_pass',
+          priority: 'candidate_batch',
+          chain: item.row.chain,
+          tokenAddress: item.row.token_address,
+          poolAddress: item.row.pool_address,
+          cycleStartedAt: item.row.cycle_started_at,
+        });
+      }
+      if (reservation.status === 'acquired' && reservation.preempted)
+        this.recordSchedulerDecision({
+          decision: 'reservation_preempted',
+          reason: `higher_priority:${finalistKey(identity)}`,
+          priority: 'candidate_batch',
+          chain: reservation.preempted.chain,
+          tokenAddress: reservation.preempted.tokenAddress,
+          poolAddress: reservation.preempted.poolAddress,
+          cycleStartedAt: reservation.preempted.cycleStartedAt,
+        });
+      initializationJobs.push(
+        this.initializeFinalist(key, item, finalistKey(identity)).catch((error) => {
+          this.finalistReservations.release(finalistKey(identity));
+          this.recordSchedulerDecision({
+            decision: 'reservation_released',
+            reason: this.safeError(error),
+            priority: 'candidate_batch',
+            chain: item.row.chain,
+            tokenAddress: item.row.token_address,
+            poolAddress: item.row.pool_address,
+            cycleStartedAt: item.row.cycle_started_at,
+          });
+          this.options.logger('warn', 'finalist_initialization_failed', {
+            chain: item.row.chain,
+            pool_address: item.row.pool_address,
+            error: this.safeError(error),
+          });
+        }),
+      );
+    }
+    await Promise.allSettled(initializationJobs);
+  }
+
+  private async initializeFinalist(
+    key: string,
+    item: { row: ArmCandidateRow; pool: CanonicalPool; screening: Level1ScreeningSnapshot },
+    reservationKey: string,
+  ): Promise<void> {
+    const { row, pool, screening } = item;
+    const network = row.chain === 'sol' ? 'solana' : 'bsc';
+    const retry = this.options.config.providers.coingecko.scheduler.initialization_retry;
+    let tradePayload: { payload: Record<string, unknown>; observedAt: number } | undefined;
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= retry.max_attempts; attempt += 1) {
+      try {
+        tradePayload = await this.scheduleCoinGeckoRequest({
+          key: `trades.initialize:${reservationKey}:${attempt}`,
+          kind: 'candidate_batch',
+          requestType: 'trade',
+          chain: row.chain,
+          createdAt: Date.now(),
+          run: async (signal) => {
+            const tradeUrl = `${this.options.config.providers.coingecko.rest_base_url}/onchain/networks/${network}/pools/${encodeURIComponent(row.pool_address)}/trades`;
+            assertAnalystEndpoint(tradeUrl, this.options.config.providers.coingecko.rest_base_url);
+            const tradeResult = await requestJson<Record<string, unknown>>(
+              tradeUrl,
+              { headers: { 'x-cg-pro-api-key': key }, signal },
+              httpOptions(this.options.config, 'coingecko', 'trades.level1.initialize'),
+            );
+            const payload = coingeckoTradesRawSchema.parse(tradeResult.data);
+            const observedAt = Date.now();
+            const rawPayload = JSON.stringify(payload);
+            insertProviderEvent(
+              this.options.database,
+              {
+                provider: 'coingecko',
+                capability: 'trades.level1',
+                chain: row.chain,
+                tokenAddress: row.token_address,
+                poolAddress: row.pool_address,
+                observedAt,
+                schemaVersion: 'coingecko.trades.v1',
+                payload: rawPayload,
+                billingBucket: 'g2_confirmation',
+                requestMeta: {
+                  endpoint_name: 'onchain.pools.trades.initialize',
+                  method: 'GET',
+                  status: tradeResult.diagnostic.status,
+                  response_bytes: Buffer.byteLength(rawPayload),
+                },
+              },
+              this.options.writeBudget,
+            );
+            return { payload, observedAt };
+          },
+        });
+        break;
+      } catch (error) {
+        lastError = error;
+        if (!isTransientProviderError(error) || attempt === retry.max_attempts) throw error;
+        await delay(Math.min(retry.max_delay_ms, retry.base_delay_ms * 2 ** (attempt - 1)));
+      }
+    }
+    if (!tradePayload) throw lastError ?? new Error('finalist:initialization_failed');
+    const eventAt = latestTradeAt(tradePayload.payload);
+    if (eventAt === undefined) {
+      this.finalistReservations.release(reservationKey);
+      this.recordSchedulerDecision({
+        decision: 'reservation_released',
+        reason: 'initialization:no_trade_event',
+        priority: 'candidate_batch',
+        chain: row.chain,
+        tokenAddress: row.token_address,
+        poolAddress: row.pool_address,
+        cycleStartedAt: row.cycle_started_at,
+      });
+      return;
+    }
+    const promoted = promoteLevel1ScreeningSnapshot(screening, {
+      source: 'rest',
+      chain: row.chain,
+      poolAddress: row.pool_address,
+      tokenAddress: row.token_address,
+      eventAt,
+      observedAt: tradePayload.observedAt,
+    });
+    if (promoted.status !== 'complete') {
+      this.finalistReservations.release(reservationKey);
+      this.recordSchedulerDecision({
+        decision: 'reservation_released',
+        reason: `initialization:${promoted.reasons.join('|')}`,
+        priority: 'candidate_batch',
+        chain: row.chain,
+        tokenAddress: row.token_address,
+        poolAddress: row.pool_address,
+        cycleStartedAt: row.cycle_started_at,
+      });
+      return;
+    }
+    const previous = this.level1Snapshots.get(pool.identityKey);
+    if (previous) this.previousLevel1Snapshots.set(pool.identityKey, previous);
+    this.level1Snapshots.set(pool.identityKey, promoted.snapshot);
+    const changed = boundedWrite(this.options.database, this.options.writeBudget, (context) => {
+      const info = this.options.database
+        .prepare(
+          `UPDATE candidates SET status = 'armed', funnel_status = 'armed', updated_at = ?
+           WHERE id = ? AND chain = ? AND token_address = ? AND pool_address = ?
+             AND cycle_started_at = ? AND config_version_id = ?
+             AND safety_status = 'pass' AND status != 'expired'`,
+        )
+        .run(
+          Date.now(),
+          row.id,
+          pool.chain,
+          pool.tokenAddress,
+          pool.poolAddress,
+          row.cycle_started_at,
+          this.options.configVersionId,
+        );
+      context.addRows(info.changes);
+      return info.changes;
+    }).value;
+    if (changed !== 1) {
+      this.finalistReservations.release(reservationKey);
+      this.recordSchedulerDecision({
+        decision: 'reservation_released',
+        reason: 'candidate:no_longer_eligible',
+        priority: 'candidate_batch',
+        chain: row.chain,
+        tokenAddress: row.token_address,
+        poolAddress: row.pool_address,
+        cycleStartedAt: row.cycle_started_at,
+      });
+      return;
+    }
+    if (!this.finalistReservations.convertToArmed(reservationKey, Date.now())) {
       boundedWrite(this.options.database, this.options.writeBudget, (context) => {
         const info = this.options.database
           .prepare(
-            `UPDATE candidates SET status = 'armed', funnel_status = 'armed', updated_at = ?
-             WHERE id = ? AND chain = ? AND token_address = ? AND pool_address = ?
-               AND safety_status = 'pass' AND status != 'expired'`,
+            `UPDATE candidates SET status = 'scouting', funnel_status = 'level1_screened', updated_at = ?
+             WHERE id = ? AND cycle_started_at = ? AND status = 'armed'`,
           )
-          .run(Date.now(), row.id, pool.chain, pool.tokenAddress, pool.poolAddress);
+          .run(Date.now(), row.id, row.cycle_started_at);
         context.addRows(info.changes);
       });
+      this.recordSchedulerDecision({
+        decision: 'reservation_released',
+        reason: 'reservation:expired_before_armed',
+        priority: 'candidate_batch',
+        chain: row.chain,
+        tokenAddress: row.token_address,
+        poolAddress: row.pool_address,
+        cycleStartedAt: row.cycle_started_at,
+      });
+      return;
     }
+    const result = this.g2Client!.request(pool, 'armed');
+    if (result === 'rejected_capacity') {
+      this.finalistReservations.releaseOccupied(
+        g2IdentityKey({
+          chain: row.chain,
+          tokenAddress: row.token_address,
+          poolAddress: row.pool_address,
+        }),
+      );
+      boundedWrite(this.options.database, this.options.writeBudget, (context) => {
+        const info = this.options.database
+          .prepare(
+            `UPDATE candidates SET status = 'scouting', funnel_status = 'level1_screened', updated_at = ?
+             WHERE id = ? AND cycle_started_at = ? AND status = 'armed'`,
+          )
+          .run(Date.now(), row.id, row.cycle_started_at);
+        context.addRows(info.changes);
+      });
+      this.recordSchedulerDecision({
+        decision: 'armed_reverted',
+        reason: 'g2:rejected_capacity',
+        priority: 'candidate_batch',
+        chain: row.chain,
+        tokenAddress: row.token_address,
+        poolAddress: row.pool_address,
+        cycleStartedAt: row.cycle_started_at,
+      });
+      return;
+    }
+    this.recordSchedulerDecision({
+      decision: 'armed',
+      reason: 'rest_trade_promoted_then_g2_requested',
+      priority: 'candidate_batch',
+      chain: row.chain,
+      tokenAddress: row.token_address,
+      poolAddress: row.pool_address,
+      cycleStartedAt: row.cycle_started_at,
+    });
+    this.finalistWaitingSince.delete(reservationKey);
+    this.options.logger('info', 'finalist_armed', {
+      chain: row.chain,
+      pool_address: row.pool_address,
+      cycle_started_at: row.cycle_started_at,
+    });
   }
 
   private restorePreviousLevel1Snapshot(
@@ -1260,6 +1985,7 @@ export class ProviderProbe {
       sent_at: number | null;
       delivery_uncertain: number;
     }>;
+    const jobs: Array<Promise<void>> = [];
     for (const row of rows) {
       if (row.delivery_uncertain === 1) {
         this.expireSignal(row.signal_id, 'anchor:delivery_uncertain');
@@ -1295,87 +2021,113 @@ export class ProviderProbe {
       const finalCutoff =
         row.sent_at +
         (maxHorizon + this.options.config.outcomes.outcome_max_lateness_seconds) * 1000;
-      try {
-        const candles = await this.fetchOutcomeCandles(key, pool, row.sent_at, now);
-        if (now < finalCutoff) continue;
-        const trades = readNormalizedTrades(
-          this.options.database,
+      jobs.push(
+        this.processOutcomeRow(
+          key,
+          { ...row, sent_at: row.sent_at },
+          signal,
           pool,
-          row.sent_at - this.options.config.outcomes.entry_max_event_delay_seconds * 1000,
-          finalCutoff,
-        );
-        const entry = selectEntry({
-          trades,
-          chain: row.chain,
-          poolAddress: pool.poolAddress,
-          tokenAddress: pool.tokenAddress,
-          anchorDeliveredAt: row.sent_at,
-          now,
-          entryTimeoutSeconds: this.options.config.outcomes.entry_timeout_seconds,
-          maxTransportDelaySeconds: this.options.config.outcomes.entry_max_event_delay_seconds,
-          maxFutureSkewSeconds: this.options.config.outcomes.max_future_event_skew_seconds,
-          anchorToleranceSeconds: this.options.config.outcomes.entry_max_event_delay_seconds,
-        });
-        const selectedEntry = entry.status === 'executable' ? entry.trade : undefined;
-        const execution = evaluateExecution({
-          entry,
-          g2CoverageComplete: !this.g2QueueIncomplete,
-          restCoverageComplete: hasCandleCoverage(
-            candles,
-            row.sent_at,
-            row.sent_at + maxHorizon * 1000,
-          ),
-          restConflict:
-            selectedEntry !== undefined &&
-            !candleContainsTrade(candles, selectedEntry, row.sent_at),
-        });
-        const entryPartial = selectedEntry ? partialFromTrades(selectedEntry, trades) : undefined;
-        const horizonResults = this.options.config.outcomes.horizons_seconds.map((horizonSeconds) =>
-          evaluateHorizon({
-            anchorDeliveredAt: row.sent_at!,
-            horizonSeconds,
-            outcomeMaxLatenessSeconds: this.options.config.outcomes.outcome_max_lateness_seconds,
-            ...(selectedEntry
-              ? {
-                  entry: { observedAt: selectedEntry.observedAt, priceUsd: selectedEntry.priceUsd },
-                }
-              : {}),
-            candles,
-            ...(entryPartial ? { entryPartial } : {}),
-          }),
-        );
-        const entryEventId = selectedEntry
-          ? findTradeId(this.options.database, selectedEntry)
-          : undefined;
-        insertOutcome(this.options.database, {
-          signalId: row.signal_id,
-          configVersionId: row.config_version_id,
           anchorDestination,
-          anchorDeliveredAt: row.sent_at,
-          executionStatus: execution.status,
-          executionReason: execution.reason,
-          ...(entryEventId === undefined ? {} : { entryEventId }),
-          ...(selectedEntry
-            ? {
-                entryObservedAt: selectedEntry.observedAt,
-                deliveryToEntryLatencyMs: selectedEntry.observedAt - row.sent_at,
-                entryPrice: selectedEntry.priceUsd,
-                deliveryDrift: drift(selectedEntry.priceUsd, signal.confirmationPriceUsd),
-              }
-            : {}),
-          ...(row.pre_send_drift === null ? {} : { preSendDrift: row.pre_send_drift }),
-          horizonResults,
-          createdAt: now,
-          budget: this.options.writeBudget,
-        });
-        this.completeSignal(row.signal_id);
-      } catch (error) {
-        this.options.logger('warn', 'outcome_runtime_incomplete', {
-          signal_id: row.signal_id,
-          error: this.safeError(error),
-        });
-      }
+          now,
+          maxHorizon,
+          finalCutoff,
+        ).catch((error: unknown) => {
+          this.options.logger('warn', 'outcome_runtime_incomplete', {
+            signal_id: row.signal_id,
+            error: this.safeError(error),
+          });
+        }),
+      );
     }
+    await Promise.allSettled(jobs);
+  }
+
+  private async processOutcomeRow(
+    key: string,
+    row: {
+      signal_id: number;
+      config_version_id: number;
+      pre_send_drift: string | null;
+      chain: 'sol' | 'bsc';
+      sent_at: number;
+    },
+    signal: SignalSnapshot,
+    pool: CanonicalPool,
+    anchorDestination: 'admin_private' | 'channel' | 'group',
+    now: number,
+    maxHorizon: number,
+    finalCutoff: number,
+  ): Promise<void> {
+    const candles = await this.fetchOutcomeCandles(key, pool, row.sent_at, now, finalCutoff);
+    if (now < finalCutoff) return;
+    const trades = readNormalizedTrades(
+      this.options.database,
+      pool,
+      row.sent_at - this.options.config.outcomes.entry_max_event_delay_seconds * 1000,
+      finalCutoff,
+    );
+    const entry = selectEntry({
+      trades,
+      chain: row.chain,
+      poolAddress: pool.poolAddress,
+      tokenAddress: pool.tokenAddress,
+      anchorDeliveredAt: row.sent_at,
+      now,
+      entryTimeoutSeconds: this.options.config.outcomes.entry_timeout_seconds,
+      maxTransportDelaySeconds: this.options.config.outcomes.entry_max_event_delay_seconds,
+      maxFutureSkewSeconds: this.options.config.outcomes.max_future_event_skew_seconds,
+      anchorToleranceSeconds: this.options.config.outcomes.entry_max_event_delay_seconds,
+    });
+    const selectedEntry = entry.status === 'executable' ? entry.trade : undefined;
+    const execution = evaluateExecution({
+      entry,
+      g2CoverageComplete: !this.g2QueueIncomplete,
+      restCoverageComplete: hasCandleCoverage(
+        candles,
+        row.sent_at,
+        row.sent_at + maxHorizon * 1000,
+      ),
+      restConflict:
+        selectedEntry !== undefined && !candleContainsTrade(candles, selectedEntry, row.sent_at),
+    });
+    const entryPartial = selectedEntry ? partialFromTrades(selectedEntry, trades) : undefined;
+    const horizonResults = this.options.config.outcomes.horizons_seconds.map((horizonSeconds) =>
+      evaluateHorizon({
+        anchorDeliveredAt: row.sent_at,
+        horizonSeconds,
+        outcomeMaxLatenessSeconds: this.options.config.outcomes.outcome_max_lateness_seconds,
+        ...(selectedEntry
+          ? { entry: { observedAt: selectedEntry.observedAt, priceUsd: selectedEntry.priceUsd } }
+          : {}),
+        candles,
+        ...(entryPartial ? { entryPartial } : {}),
+      }),
+    );
+    const entryEventId = selectedEntry
+      ? findTradeId(this.options.database, selectedEntry)
+      : undefined;
+    insertOutcome(this.options.database, {
+      signalId: row.signal_id,
+      configVersionId: row.config_version_id,
+      anchorDestination,
+      anchorDeliveredAt: row.sent_at,
+      executionStatus: execution.status,
+      executionReason: execution.reason,
+      ...(entryEventId === undefined ? {} : { entryEventId }),
+      ...(selectedEntry
+        ? {
+            entryObservedAt: selectedEntry.observedAt,
+            deliveryToEntryLatencyMs: selectedEntry.observedAt - row.sent_at,
+            entryPrice: selectedEntry.priceUsd,
+            deliveryDrift: drift(selectedEntry.priceUsd, signal.confirmationPriceUsd),
+          }
+        : {}),
+      ...(row.pre_send_drift === null ? {} : { preSendDrift: row.pre_send_drift }),
+      horizonResults,
+      createdAt: now,
+      budget: this.options.writeBudget,
+    });
+    this.completeSignal(row.signal_id);
   }
 
   private async fetchOutcomeCandles(
@@ -1383,6 +2135,7 @@ export class ProviderProbe {
     pool: CanonicalPool,
     anchorDeliveredAt: number,
     now: number,
+    finalCutoff: number,
   ): Promise<Candle[]> {
     const network = pool.chain === 'sol' ? 'solana' : 'bsc';
     const limit = Math.min(
@@ -1396,11 +2149,20 @@ export class ProviderProbe {
     );
     const url = `${this.options.config.providers.coingecko.rest_base_url}/onchain/networks/${network}/pools/${encodeURIComponent(pool.poolAddress)}/ohlcv/second?aggregate=30&limit=${limit}&currency=usd&token=${pool.targetSide}&include_empty_intervals=true`;
     assertAnalystEndpoint(url, this.options.config.providers.coingecko.rest_base_url);
-    const result = await requestJson<Record<string, unknown>>(
-      url,
-      { headers: { 'x-cg-pro-api-key': key } },
-      httpOptions(this.options.config, 'coingecko', 'ohlcv.30s'),
-    );
+    const result = await this.scheduleCoinGeckoRequest({
+      key: `ohlcv.30s:${pool.identityKey}:${now}`,
+      kind: 'outcome',
+      requestType: 'batch',
+      chain: pool.chain,
+      createdAt: now,
+      deadlineAt: finalCutoff,
+      run: (signal) =>
+        requestJson<Record<string, unknown>>(
+          url,
+          { headers: { 'x-cg-pro-api-key': key }, signal },
+          httpOptions(this.options.config, 'coingecko', 'ohlcv.30s'),
+        ),
+    });
     const observedAt = Date.now();
     const parsed = coingeckoOhlcv30sRawSchema.parse(result.data);
     const payload = JSON.stringify(parsed);
@@ -1757,13 +2519,7 @@ export class ProviderProbe {
     if (result.status !== 'created') {
       this.logSignalBlocked(trade, result.reasons);
       if (allowRefresh && shouldRefreshConfirmationEvidence(result.reasons))
-        this.scheduleConfirmationRefresh(
-          trade,
-          candidate.id,
-          pool,
-          windowEnd,
-          result.reasons,
-        );
+        this.scheduleConfirmationRefresh(trade, candidate.id, pool, windowEnd, result.reasons);
       return;
     }
     this.g2Client?.request(pool, 'confirmed-pending-anchor');
@@ -1784,8 +2540,7 @@ export class ProviderProbe {
   ): void {
     const key = `${trade.chain}:${trade.poolAddress}:${trade.tokenAddress}:${windowEnd}`;
     if (this.stopping || this.confirmationRefreshAttempted.has(key)) return;
-    if (this.confirmationRefreshAttempted.size >= 10_000)
-      this.confirmationRefreshAttempted.clear();
+    if (this.confirmationRefreshAttempted.size >= 10_000) this.confirmationRefreshAttempted.clear();
     this.confirmationRefreshAttempted.add(key);
     this.options.logger('info', 'confirmation_evidence_refresh_started', {
       chain: trade.chain,
@@ -1797,7 +2552,7 @@ export class ProviderProbe {
       now: Date.now,
       configVersionId: String(this.options.configVersionId),
       refreshSafety: () => this.refreshCandidateSafety(candidateId, trade),
-      refreshLevel1: () => this.refreshConfirmationLevel1(candidateId, pool),
+      refreshLevel1: () => this.refreshConfirmationLevel1(candidateId, pool, windowEnd + 30_000),
     })
       .then((result) => {
         if (result.status === 'blocked') {
@@ -1894,17 +2649,27 @@ export class ProviderProbe {
   private async refreshConfirmationLevel1(
     candidateId: number,
     pool: CanonicalPool,
+    deadlineAt: number,
   ): Promise<Level1Snapshot | undefined> {
     const key = this.options.secrets[this.options.config.providers.coingecko.api_key_env];
     if (!key) throw new Error('CoinGecko secret is not configured');
     const network = pool.chain === 'sol' ? 'solana' : 'bsc';
     const poolUrl = `${this.options.config.providers.coingecko.rest_base_url}/onchain/networks/${network}/pools/multi/${encodeURIComponent(pool.poolAddress)}?include=base_token,quote_token&include_volume_breakdown=true&include_composition=true`;
     assertAnalystEndpoint(poolUrl, this.options.config.providers.coingecko.rest_base_url);
-    const poolResult = await requestJson<Record<string, unknown>>(
-      poolUrl,
-      { headers: { 'x-cg-pro-api-key': key } },
-      httpOptions(this.options.config, 'coingecko', 'pools.multi.level1.confirmation'),
-    );
+    const poolResult = await this.scheduleCoinGeckoRequest({
+      key: `pools.multi.confirmation:${pool.identityKey}:${deadlineAt}`,
+      kind: 'confirmation',
+      requestType: 'batch',
+      chain: pool.chain,
+      createdAt: Date.now(),
+      deadlineAt,
+      run: (signal) =>
+        requestJson<Record<string, unknown>>(
+          poolUrl,
+          { headers: { 'x-cg-pro-api-key': key }, signal },
+          httpOptions(this.options.config, 'coingecko', 'pools.multi.level1.confirmation'),
+        ),
+    });
     const batch = coingeckoPoolBatchRawSchema.parse(poolResult.data);
     const poolObservedAt = Date.now();
     const poolPayload = JSON.stringify(batch);
@@ -1937,11 +2702,20 @@ export class ProviderProbe {
 
     const tradeUrl = `${this.options.config.providers.coingecko.rest_base_url}/onchain/networks/${network}/pools/${encodeURIComponent(pool.poolAddress)}/trades`;
     assertAnalystEndpoint(tradeUrl, this.options.config.providers.coingecko.rest_base_url);
-    const tradeResult = await requestJson<Record<string, unknown>>(
-      tradeUrl,
-      { headers: { 'x-cg-pro-api-key': key } },
-      httpOptions(this.options.config, 'coingecko', 'trades.level1.confirmation'),
-    );
+    const tradeResult = await this.scheduleCoinGeckoRequest({
+      key: `trades.confirmation:${pool.identityKey}:${deadlineAt}`,
+      kind: 'confirmation',
+      requestType: 'trade',
+      chain: pool.chain,
+      createdAt: Date.now(),
+      deadlineAt,
+      run: (signal) =>
+        requestJson<Record<string, unknown>>(
+          tradeUrl,
+          { headers: { 'x-cg-pro-api-key': key }, signal },
+          httpOptions(this.options.config, 'coingecko', 'trades.level1.confirmation'),
+        ),
+    });
     const trades = coingeckoTradesRawSchema.parse(tradeResult.data);
     const tradeObservedAt = Date.now();
     const tradePayload = JSON.stringify(trades);
@@ -2059,63 +2833,90 @@ export class ProviderProbe {
     this.options.logger('warn', 'g2_evidence_incomplete', { reason });
   }
 
-  private async resolveCoinGeckoPools(key: string): Promise<void> {
+  private async resolveCoinGeckoPools(key: string): Promise<unknown[]> {
     const disk = readDiskHealth(
       path.dirname(path.resolve(this.options.config.storage.database_path)),
       this.options.config.storage.disk_high_water_percent,
     );
     if (disk.highWater) throw new Error('disk:high_water');
-    for (const chain of ['sol', 'bsc'] as const) {
-      const now = Date.now();
-      const chainRows = selectPoolResolutionRows(
-        this.options.database,
+    const results = await Promise.allSettled(
+      (['sol', 'bsc'] as const).map((chain) => this.resolveCoinGeckoPoolsForChain(key, chain)),
+    );
+    const chains = ['sol', 'bsc'] as const;
+    const failures = results.flatMap((result, index) =>
+      result.status === 'rejected' ? [{ chain: chains[index]!, reason: result.reason }] : [],
+    );
+    for (const failure of failures)
+      this.options.logger('warn', 'pool_resolution_chain_failed', {
+        chain: failure.chain,
+        error: this.safeError(failure.reason),
+      });
+    return failures.map((failure) => failure.reason);
+  }
+
+  private async resolveCoinGeckoPoolsForChain(key: string, chain: 'sol' | 'bsc'): Promise<void> {
+    const now = Date.now();
+    const chainRows = selectPoolResolutionRows(
+      this.options.database,
+      chain,
+      now,
+      this.options.config.chains[chain].discovery.candidate_ttl_seconds,
+      this.options.config.providers.coingecko.max_pools_per_batch,
+      this.options.configVersionId,
+    );
+    const tokens = [...new Set(chainRows.map((row) => row.token_address))].slice(
+      0,
+      this.options.config.providers.coingecko.max_pools_per_batch,
+    );
+    if (tokens.length === 0) return;
+    const network = chain === 'sol' ? 'solana' : 'bsc';
+    const url = `${this.options.config.providers.coingecko.rest_base_url}/onchain/networks/${network}/tokens/multi/${tokens.map(encodeURIComponent).join(',')}?include=top_pools&include_composition=true`;
+    assertAnalystEndpoint(url, this.options.config.providers.coingecko.rest_base_url);
+    const identityKey = tokens
+      .map((token) => (chain === 'bsc' ? token.toLowerCase() : token))
+      .sort()
+      .join(',');
+    const result = await this.scheduleCoinGeckoRequest({
+      key: `tokens.multi:${chain}:${identityKey}`,
+      kind: 'candidate_batch',
+      requestType: 'batch',
+      chain,
+      createdAt: now,
+      run: (signal) =>
+        requestJson<Record<string, unknown>>(
+          url,
+          { headers: { 'x-cg-pro-api-key': key }, signal },
+          httpOptions(this.options.config, 'coingecko', 'tokens.multi'),
+        ),
+    });
+    const parsed = coingeckoPoolBatchRawSchema.parse(result.data);
+    const observedAt = Date.now();
+    const payload = JSON.stringify(parsed);
+    insertProviderEvent(
+      this.options.database,
+      {
+        provider: 'coingecko',
+        capability: 'tokens.multi',
         chain,
-        now,
-        this.options.config.chains[chain].discovery.candidate_ttl_seconds,
-        this.options.config.providers.coingecko.max_pools_per_batch,
-      );
-      const tokens = [...new Set(chainRows.map((row) => row.token_address))].slice(
-        0,
-        this.options.config.providers.coingecko.max_pools_per_batch,
-      );
-      if (tokens.length === 0) continue;
-      const network = chain === 'sol' ? 'solana' : 'bsc';
-      const url = `${this.options.config.providers.coingecko.rest_base_url}/onchain/networks/${network}/tokens/multi/${tokens.map(encodeURIComponent).join(',')}?include=top_pools&include_composition=true`;
-      assertAnalystEndpoint(url, this.options.config.providers.coingecko.rest_base_url);
-      const result = await requestJson<Record<string, unknown>>(
-        url,
-        { headers: { 'x-cg-pro-api-key': key } },
-        httpOptions(this.options.config, 'coingecko', 'tokens.multi'),
-      );
-      const parsed = coingeckoPoolBatchRawSchema.parse(result.data);
-      const observedAt = Date.now();
-      insertProviderEvent(
-        this.options.database,
-        {
-          provider: 'coingecko',
-          capability: 'tokens.multi',
-          chain,
-          observedAt,
-          schemaVersion: 'coingecko.tokens.multi.v1',
-          payload: JSON.stringify(parsed),
-          billingBucket: 'pool_screening',
-          requestMeta: {
-            endpoint_name: 'onchain.tokens.multi',
-            method: 'GET',
-            status: result.diagnostic.status,
-            response_bytes: Buffer.byteLength(JSON.stringify(parsed)),
-          },
-        },
-        this.options.writeBudget,
-      );
-      this.applyPoolSelections(
-        chainRows.filter((row) => tokens.includes(row.token_address)),
-        parsed,
-        network,
         observedAt,
-      );
-      await delay(60_000 / this.options.config.providers.coingecko.rest_requests_per_minute);
-    }
+        schemaVersion: 'coingecko.tokens.multi.v1',
+        payload,
+        billingBucket: 'pool_screening',
+        requestMeta: {
+          endpoint_name: 'onchain.tokens.multi',
+          method: 'GET',
+          status: result.diagnostic.status,
+          response_bytes: Buffer.byteLength(payload),
+        },
+      },
+      this.options.writeBudget,
+    );
+    this.applyPoolSelections(
+      chainRows.filter((row) => tokens.includes(row.token_address)),
+      parsed,
+      network,
+      observedAt,
+    );
   }
 
   private applyPoolSelections(
@@ -2211,6 +3012,28 @@ export class ProviderProbe {
   }
 }
 
+export function summarizeLevel1BatchResults(
+  expectedCounts: number[],
+  results: PromiseSettledResult<{ attempted: number; complete: number }>[],
+): { attempted: number; complete: number; failures: number } {
+  if (expectedCounts.length !== results.length)
+    throw new Error('Level 1 batch result count does not match scheduled work');
+  let attempted = 0;
+  let complete = 0;
+  let failures = 0;
+  for (const [index, result] of results.entries()) {
+    if (result.status === 'fulfilled') {
+      attempted += result.value.attempted;
+      complete += result.value.complete;
+    } else {
+      attempted += expectedCounts[index] ?? 0;
+      failures += 1;
+    }
+  }
+  if (complete > attempted) throw new Error('Invalid Level 1 batch summary');
+  return { attempted, complete, failures };
+}
+
 function httpOptions(
   config: BotConfig,
   provider: 'coingecko' | 'telegram',
@@ -2227,6 +3050,20 @@ function httpOptions(
     baseDelayMs: 1,
     maxDelayMs: 1,
   };
+}
+
+function isTransientProviderError(error: unknown): boolean {
+  if (!(error instanceof ProviderRequestError)) return false;
+  const status = error.diagnostic.status;
+  return (
+    status === null ||
+    status === 408 ||
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504
+  );
 }
 
 function runGmgn(args: string[], apiKey: string, timeoutMs: number): Promise<string> {
@@ -2585,15 +3422,31 @@ function readNormalizedTrades(
   });
 }
 
-function dedupePools<T extends { chain: 'sol' | 'bsc'; token_address: string; pool_address: string }>(
-  rows: T[],
-): T[] {
+function dedupePools<
+  T extends { chain: 'sol' | 'bsc'; token_address: string; pool_address: string },
+>(rows: T[]): T[] {
   const seen = new Set<string>();
   return rows.filter((row) => {
     const key = `${row.chain}:${row.chain === 'bsc' ? row.pool_address.toLowerCase() : row.pool_address}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
+  });
+}
+
+export function createCandidatePoolBatches<
+  T extends { chain: 'sol' | 'bsc'; token_address: string; pool_address: string },
+>(rows: T[], chain: 'sol' | 'bsc', maxPoolsPerBatch = 50): T[][] {
+  const uniquePools = dedupePools(rows.filter((row) => row.chain === chain));
+  return chunkCoinGeckoPools(uniquePools, maxPoolsPerBatch).map((poolBatch) => {
+    const addresses = new Set(
+      poolBatch.map((row) => (chain === 'bsc' ? row.pool_address.toLowerCase() : row.pool_address)),
+    );
+    return rows.filter(
+      (row) =>
+        row.chain === chain &&
+        addresses.has(chain === 'bsc' ? row.pool_address.toLowerCase() : row.pool_address),
+    );
   });
 }
 

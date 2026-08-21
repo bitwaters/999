@@ -1,8 +1,19 @@
 import { Decimal } from 'decimal.js';
 import type { BotConfig } from '../config/schema.js';
 import { evaluateBscSafety, evaluateSolSafety, type SafetyResult } from '../domain/safety.js';
-import { aggregateG2Window, TradeDeduper, hashG2Message, normalizeG2Item, type NormalizedTrade } from '../market-data/g2.js';
-import { parseLevel1Snapshot, type Level1Snapshot } from '../market-data/level1.js';
+import {
+  aggregateG2Window,
+  TradeDeduper,
+  hashG2Message,
+  normalizeG2Item,
+  type NormalizedTrade,
+} from '../market-data/g2.js';
+import type { Level1Snapshot } from '../market-data/level1.js';
+import {
+  parseLevel1ScreeningSnapshot,
+  promoteLevel1ScreeningSnapshot,
+  type LastTradeEvidence,
+} from '../market-data/level1-screening.js';
 import { parsePool, selectPrimaryPool, type CanonicalPool } from '../market-data/pools.js';
 import { evaluateDispatchGuard, type SignalSnapshot } from '../pipeline/ace.js';
 import type { CandidateCycle, DiscoveryObservation } from '../pipeline/candidate.js';
@@ -16,7 +27,7 @@ import {
 } from '../outcomes/evaluation.js';
 import {
   latestTradeAt,
-  level1RawForPool,
+  level1ScreeningRawForPool,
   parseCoinGeckoOhlcv30s,
   poolAttributesForAddress,
   poolRawForAddress,
@@ -33,6 +44,8 @@ export type SimulatedReplayResult = {
   outcome: Record<string, unknown>;
   completenessStatus: 'full' | 'partial' | 'unavailable';
 };
+
+type ReplayAdmission = { status: 'armed'; armedAt: number } | { status: 'blocked'; reason: string };
 
 export function simulateReplay(input: {
   config: BotConfig;
@@ -62,6 +75,13 @@ export function simulateReplay(input: {
         left.cycleStartedAt - right.cycleStartedAt || left.key.localeCompare(right.key),
     );
   const cooldowns = new Map<string, number>();
+  const admissions = buildReplayAdmissions(
+    {
+      ...input,
+      dataEndAt,
+    },
+    cycles,
+  );
   return cycles.flatMap((cycle) => {
     const result = simulateCycle({
       ...input,
@@ -69,6 +89,10 @@ export function simulateReplay(input: {
       dataEndAt,
       cycle,
       cooldowns,
+      admission: admissions.get(`${cycle.key}:${cycle.cycleStartedAt}`) ?? {
+        status: 'blocked',
+        reason: 'adaptive:admission_unavailable',
+      },
     });
     return result ? [result] : [];
   });
@@ -84,6 +108,7 @@ function simulateCycle(input: {
   cycle: CandidateCycle;
   evidence: readonly ReplayEvidence[];
   cooldowns: Map<string, number>;
+  admission: ReplayAdmission;
 }): SimulatedReplayResult | undefined {
   const key = `${input.cycle.key}:${input.cycle.cycleStartedAt}`;
   const overlapsResultWindow =
@@ -94,7 +119,8 @@ function simulateCycle(input: {
       item.observedAt >= input.cycle.cycleStartedAt &&
       item.observedAt <= input.dataCutoffAt &&
       (item.chain === undefined || item.chain === input.cycle.chain) &&
-      (item.tokenAddress === undefined || sameToken(input.cycle.chain, item.tokenAddress, input.cycle.tokenAddress)),
+      (item.tokenAddress === undefined ||
+        sameToken(input.cycle.chain, item.tokenAddress, input.cycle.tokenAddress)),
   );
   const resolvedPool = resolveFixedPool(input.cycle, relevant);
   if (!resolvedPool)
@@ -106,6 +132,10 @@ function simulateCycle(input: {
       : undefined;
 
   const { pool } = resolvedPool;
+  if (input.admission.status === 'blocked')
+    return overlapsResultWindow
+      ? unavailable(key, input.admission.reason, { poolAddress: pool.poolAddress })
+      : undefined;
   const normalizedTrades = normalizeTrades(relevant, pool, input.dataCutoffAt);
   if (normalizedTrades.length === 0)
     return overlapsResultWindow
@@ -119,10 +149,14 @@ function simulateCycle(input: {
     (left, right) => left - right,
   )) {
     if (confirmationAt > input.dataEndAt) break;
+    if (confirmationAt < input.admission.armedAt) continue;
     if (confirmationAt < resolvedPool.observedAt) continue;
     const inResultWindow = confirmationAt >= input.dataStartAt;
     if (inResultWindow) evaluatedInResultWindow = true;
-    if (confirmationAt > input.cycle.lastSeenAt + chainConfig(input).discovery.candidate_ttl_seconds * 1000)
+    if (
+      confirmationAt >
+      input.cycle.lastSeenAt + chainConfig(input).discovery.candidate_ttl_seconds * 1000
+    )
       break;
     const safety = safetyAt(input, relevant, confirmationAt);
     const level1 = level1At(relevant, pool, confirmationAt);
@@ -194,7 +228,14 @@ function simulateCycle(input: {
       continue;
     }
     const deliveredAt = confirmationAt + input.deliveryDelayMs;
-    const delivered = dispatchAt(input, relevant, pool, normalizedTrades, decision.snapshot, deliveredAt);
+    const delivered = dispatchAt(
+      input,
+      relevant,
+      pool,
+      normalizedTrades,
+      decision.snapshot,
+      deliveredAt,
+    );
     if (delivered.status !== 'send')
       return confirmationAt < input.dataStartAt
         ? undefined
@@ -215,7 +256,15 @@ function simulateCycle(input: {
       confirmationAt + input.config.strategies.emerging_breakout.cooldown_seconds * 1000,
     );
     if (confirmationAt < input.dataStartAt) return undefined;
-    return deliveredOutcome(input, relevant, pool, normalizedTrades, decision.snapshot, deliveredAt, delivered.preSendDrift);
+    return deliveredOutcome(
+      input,
+      relevant,
+      pool,
+      normalizedTrades,
+      decision.snapshot,
+      deliveredAt,
+      delivered.preSendDrift,
+    );
   }
   if (!overlapsResultWindow) return undefined;
   return {
@@ -224,12 +273,145 @@ function simulateCycle(input: {
     simulatedSignal: { status: 'blocked', ...lastBlocked },
     outcome: { status: 'unavailable', reason: 'signal:not_confirmed' },
     completenessStatus:
-      evaluatedInResultWindow &&
-      !evidenceIncomplete &&
-      hasCoreEvidence(input, relevant, pool)
+      evaluatedInResultWindow && !evidenceIncomplete && hasCoreEvidence(input, relevant, pool)
         ? 'full'
         : 'partial',
   };
+}
+
+function buildReplayAdmissions(
+  input: {
+    config: BotConfig;
+    configVersionId: number;
+    dataEndAt: number;
+    dataCutoffAt: number;
+    evidence: readonly ReplayEvidence[];
+  },
+  cycles: readonly CandidateCycle[],
+): Map<string, ReplayAdmission> {
+  const result = new Map<string, ReplayAdmission>();
+  const eligible: Array<{
+    key: string;
+    cycle: CandidateCycle;
+    pool: CanonicalPool;
+    screening: ReturnType<typeof parseLevel1ScreeningSnapshot> & { status: 'complete' };
+    eligibleAt: number;
+    expiresAt: number;
+  }> = [];
+  for (const cycle of cycles) {
+    const key = `${cycle.key}:${cycle.cycleStartedAt}`;
+    const expiresAt =
+      cycle.lastSeenAt + input.config.chains[cycle.chain].discovery.candidate_ttl_seconds * 1000;
+    const relevant = input.evidence.filter(
+      (item) =>
+        item.observedAt >= cycle.cycleStartedAt &&
+        item.observedAt <= Math.min(input.dataEndAt, input.dataCutoffAt, expiresAt) &&
+        (item.chain === undefined || item.chain === cycle.chain) &&
+        (item.tokenAddress === undefined ||
+          sameToken(cycle.chain, item.tokenAddress, cycle.tokenAddress)),
+    );
+    const resolved = resolveFixedPool(cycle, relevant);
+    if (!resolved) {
+      result.set(key, { status: 'blocked', reason: 'adaptive:pool_unavailable' });
+      continue;
+    }
+    const network = cycle.chain === 'sol' ? 'solana' : 'bsc';
+    let selected:
+      | {
+          screening: ReturnType<typeof parseLevel1ScreeningSnapshot> & { status: 'complete' };
+          eligibleAt: number;
+        }
+      | undefined;
+    for (const event of relevant.filter((item) => item.kind === 'level1').sort(byObservedAt)) {
+      const safety = safetyAt({ ...input, cycle }, relevant, event.observedAt);
+      if (safety?.status !== 'pass') continue;
+      const attention = evaluateCandidateAttention(
+        cycle.evidence.filter((item) => item.observedAt <= event.observedAt),
+        input.config.strategies.emerging_breakout.attention,
+      );
+      if (attention.status !== 'pass') continue;
+      const raw = poolRawForAddress(
+        asRecord(event.payload),
+        network,
+        resolved.pool.poolAddress,
+        resolved.pool.tokenAddress,
+      );
+      if (!raw) continue;
+      const screening = parseLevel1ScreeningSnapshot(
+        level1ScreeningRawForPool(
+          raw,
+          resolved.pool,
+          poolAttributesForAddress(asRecord(event.payload), network, resolved.pool.poolAddress),
+        ),
+        resolved.pool,
+        event.observedAt,
+      );
+      if (screening.status !== 'complete') continue;
+      selected = { screening, eligibleAt: event.observedAt };
+      break;
+    }
+    if (!selected) {
+      result.set(key, { status: 'blocked', reason: 'adaptive:structural_or_attention' });
+      continue;
+    }
+    eligible.push({ key, cycle, pool: resolved.pool, ...selected, expiresAt });
+  }
+
+  eligible.sort((left, right) => {
+    if (left.eligibleAt !== right.eligibleAt) return left.eligibleAt - right.eligibleAt;
+    const leftWindow = left.screening.snapshot.windows.m5;
+    const rightWindow = right.screening.snapshot.windows.m5;
+    if ((rightWindow?.buyers ?? 0) !== (leftWindow?.buyers ?? 0))
+      return (rightWindow?.buyers ?? 0) - (leftWindow?.buyers ?? 0);
+    const netBuy = new Decimal(rightWindow?.netBuyUsd ?? '0').comparedTo(
+      leftWindow?.netBuyUsd ?? '0',
+    );
+    if (netBuy !== 0) return netBuy;
+    return left.key.localeCompare(right.key);
+  });
+
+  const occupiedUntil: number[] = [];
+  const capacity = input.config.providers.coingecko.g2.max_subscriptions_per_socket;
+  for (const item of eligible) {
+    for (let index = occupiedUntil.length - 1; index >= 0; index -= 1)
+      if (occupiedUntil[index]! <= item.eligibleAt) occupiedUntil.splice(index, 1);
+    if (occupiedUntil.length >= capacity) {
+      result.set(item.key, { status: 'blocked', reason: 'adaptive:finalist_capacity' });
+      continue;
+    }
+    const trade = input.evidence
+      .filter(
+        (event) =>
+          event.kind === 'trades' &&
+          event.observedAt >= item.eligibleAt &&
+          event.observedAt <= Math.min(item.expiresAt, input.dataEndAt, input.dataCutoffAt) &&
+          event.poolAddress !== undefined &&
+          event.tokenAddress !== undefined &&
+          sameToken(item.pool.chain, event.poolAddress, item.pool.poolAddress) &&
+          sameToken(item.pool.chain, event.tokenAddress, item.pool.tokenAddress),
+      )
+      .sort(byObservedAt)[0];
+    const eventAt = trade ? latestTradeAt(asRecord(trade.payload)) : undefined;
+    if (!trade || eventAt === undefined) {
+      result.set(item.key, { status: 'blocked', reason: 'adaptive:finalist_trade_unavailable' });
+      continue;
+    }
+    const promoted = promoteLevel1ScreeningSnapshot(item.screening.snapshot, {
+      source: 'rest',
+      chain: item.pool.chain,
+      poolAddress: item.pool.poolAddress,
+      tokenAddress: item.pool.tokenAddress,
+      eventAt,
+      observedAt: trade.observedAt,
+    });
+    if (promoted.status !== 'complete') {
+      result.set(item.key, { status: 'blocked', reason: 'adaptive:finalist_trade_invalid' });
+      continue;
+    }
+    occupiedUntil.push(item.expiresAt);
+    result.set(item.key, { status: 'armed', armedAt: trade.observedAt });
+  }
+  return result;
 }
 
 function chainConfig(input: { config: BotConfig; cycle: CandidateCycle }) {
@@ -243,7 +425,9 @@ function candidateFreshAt(
   const lastSeenAt = input.cycle.evidence
     .filter((item) => item.observedAt <= at)
     .reduce((latest, item) => Math.max(latest, item.observedAt), input.cycle.firstSeenAt);
-  return at >= lastSeenAt && at - lastSeenAt <= chainConfig(input).discovery.candidate_ttl_seconds * 1000;
+  return (
+    at >= lastSeenAt && at - lastSeenAt <= chainConfig(input).discovery.candidate_ttl_seconds * 1000
+  );
 }
 
 function hasG2Coverage(
@@ -256,8 +440,7 @@ function hasG2Coverage(
   const level1 = level1At(evidence, pool, windowStart);
   if (
     !level1 ||
-    level1.observedAt +
-      input.config.chains[pool.chain].level1.buyers_freshness_seconds * 1000 <
+    level1.observedAt + input.config.chains[pool.chain].level1.buyers_freshness_seconds * 1000 <
       windowEnd
   )
     return false;
@@ -309,46 +492,83 @@ function level1Snapshots(
   at: number,
 ): Level1Snapshot[] {
   const network = pool.chain === 'sol' ? 'solana' : 'bsc';
-  const tradeEvents = evidence
-    .filter(
-      (item) =>
-        item.kind === 'trades' &&
-        item.observedAt <= at &&
-        item.poolAddress !== undefined &&
-        sameToken(pool.chain, item.poolAddress, pool.poolAddress),
-    )
-    .sort(byObservedAt);
   const poolEvents = evidence
     .filter((item) => item.kind === 'level1' && item.observedAt <= at)
     .sort(byObservedAt);
   return poolEvents.flatMap((poolEvent, index) => {
-      const nextPoolObservedAt = poolEvents[index + 1]?.observedAt ?? Number.POSITIVE_INFINITY;
-      const tradeEvent = tradeEvents.find(
-        (item) =>
-          item.observedAt >= poolEvent.observedAt && item.observedAt < nextPoolObservedAt,
-      );
-      if (!tradeEvent) return [];
-      const raw = poolRawForAddress(
-        asRecord(poolEvent.payload),
-        network,
-        pool.poolAddress,
-        pool.tokenAddress,
-      );
-      if (!raw) return [];
-      const observedAt = Math.max(poolEvent.observedAt, tradeEvent.observedAt);
-      const parsed = parseLevel1Snapshot(
-        level1RawForPool(
-          raw,
-          pool,
-          poolAttributesForAddress(asRecord(poolEvent.payload), network, pool.poolAddress),
-          observedAt,
-          latestTradeAt(asRecord(tradeEvent.payload)),
-        ),
+    const nextPoolObservedAt = poolEvents[index + 1]?.observedAt ?? Number.POSITIVE_INFINITY;
+    const raw = poolRawForAddress(
+      asRecord(poolEvent.payload),
+      network,
+      pool.poolAddress,
+      pool.tokenAddress,
+    );
+    if (!raw) return [];
+    const screening = parseLevel1ScreeningSnapshot(
+      level1ScreeningRawForPool(
+        raw,
         pool,
-        observedAt,
-      );
-      return parsed.status === 'complete' ? [parsed.snapshot] : [];
-    });
+        poolAttributesForAddress(asRecord(poolEvent.payload), network, pool.poolAddress),
+      ),
+      pool,
+      poolEvent.observedAt,
+    );
+    if (screening.status !== 'complete') return [];
+    const event = replayLastTradeEvidence(
+      evidence,
+      pool,
+      poolEvent.observedAt,
+      Math.min(at + 1, nextPoolObservedAt),
+    );
+    if (!event) return [];
+    const promoted = promoteLevel1ScreeningSnapshot(screening.snapshot, event);
+    return promoted.status === 'complete' ? [promoted.snapshot] : [];
+  });
+}
+
+function replayLastTradeEvidence(
+  evidence: readonly ReplayEvidence[],
+  pool: CanonicalPool,
+  poolObservedAt: number,
+  upperObservedAt: number,
+): LastTradeEvidence | undefined {
+  const matches = evidence
+    .filter(
+      (item) =>
+        item.observedAt < upperObservedAt &&
+        item.poolAddress !== undefined &&
+        sameToken(pool.chain, item.poolAddress, pool.poolAddress) &&
+        (item.kind === 'trades' || item.kind === 'g2'),
+    )
+    .sort(byObservedAt);
+  const selected =
+    matches.filter((item) => item.observedAt >= poolObservedAt).at(-1) ??
+    matches.filter((item) => item.observedAt < poolObservedAt).at(-1);
+  if (!selected) return undefined;
+  if (selected.kind === 'trades') {
+    const eventAt = latestTradeAt(asRecord(selected.payload));
+    return eventAt === undefined
+      ? undefined
+      : {
+          source: 'rest',
+          chain: pool.chain,
+          poolAddress: pool.poolAddress,
+          tokenAddress: pool.tokenAddress,
+          eventAt,
+          observedAt: selected.observedAt,
+        };
+  }
+  const parsed = normalizeG2Item(asRecord(selected.payload), pool, selected.observedAt);
+  return parsed.status !== 'complete'
+    ? undefined
+    : {
+        source: 'g2',
+        chain: pool.chain,
+        poolAddress: pool.poolAddress,
+        tokenAddress: pool.tokenAddress,
+        eventAt: parsed.trade.eventAt,
+        observedAt: parsed.trade.observedAt,
+      };
 }
 
 function level1At(evidence: readonly ReplayEvidence[], pool: CanonicalPool, at: number) {
@@ -366,7 +586,9 @@ function normalizeTrades(
 ): NormalizedTrade[] {
   const deduper = new TradeDeduper();
   const trades: NormalizedTrade[] = [];
-  for (const item of evidence.filter((event) => event.kind === 'g2' && event.observedAt <= at).sort(byObservedAt)) {
+  for (const item of evidence
+    .filter((event) => event.kind === 'g2' && event.observedAt <= at)
+    .sort(byObservedAt)) {
     const raw = asRecord(item.payload);
     if (typeof raw.pa !== 'string' || !sameToken(pool.chain, raw.pa, pool.poolAddress)) continue;
     const parsed = normalizeG2Item(raw, pool, item.observedAt);
@@ -386,7 +608,8 @@ function dispatchAt(
 ) {
   const safety = safetyAt(input, evidence, deliveredAt);
   const level1 = level1At(evidence, pool, deliveredAt);
-  if (!safety || !level1) return { status: 'cancel' as const, reason: 'dispatch:evidence_unavailable' };
+  if (!safety || !level1)
+    return { status: 'cancel' as const, reason: 'dispatch:evidence_unavailable' };
   const windowEnd = Math.floor(signal.confirmedAt / 30_000) * 30_000;
   const g2 = aggregateG2Window(
     trades.filter((trade) => trade.observedAt <= deliveredAt),
@@ -394,13 +617,7 @@ function dispatchAt(
     windowEnd,
     deliveredAt,
   );
-  const coveredG2 = hasG2Coverage(
-    input,
-    evidence,
-    pool,
-    windowEnd - 30_000,
-    windowEnd,
-  );
+  const coveredG2 = hasG2Coverage(input, evidence, pool, windowEnd - 30_000, windowEnd);
   return evaluateDispatchGuard({
     signal,
     now: deliveredAt,
@@ -446,8 +663,7 @@ function deliveredOutcome(
   const selected = entry.status === 'executable' ? entry.trade : undefined;
   const maxHorizon = Math.max(...input.config.outcomes.horizons_seconds);
   const finalCutoff =
-    deliveredAt +
-    (maxHorizon + input.config.outcomes.outcome_max_lateness_seconds) * 1000;
+    deliveredAt + (maxHorizon + input.config.outcomes.outcome_max_lateness_seconds) * 1000;
   const restComplete = hasCandleCoverage(candles, deliveredAt, deliveredAt + maxHorizon * 1000);
   const execution = evaluateExecution({
     entry,
@@ -463,7 +679,9 @@ function deliveredOutcome(
       anchorDeliveredAt: deliveredAt,
       horizonSeconds,
       outcomeMaxLatenessSeconds: input.config.outcomes.outcome_max_lateness_seconds,
-      ...(selected ? { entry: { observedAt: selected.observedAt, priceUsd: selected.priceUsd } } : {}),
+      ...(selected
+        ? { entry: { observedAt: selected.observedAt, priceUsd: selected.priceUsd } }
+        : {}),
       candles,
       ...(entryPartial ? { entryPartial } : {}),
     }),
@@ -533,8 +751,8 @@ function hasCoreEvidence(
 ): boolean {
   return Boolean(
     safetyAt(input, evidence, input.dataCutoffAt) &&
-      level1At(evidence, pool, input.dataCutoffAt) &&
-      evidence.some((item) => item.kind === 'g2'),
+    level1At(evidence, pool, input.dataCutoffAt) &&
+    evidence.some((item) => item.kind === 'g2'),
   );
 }
 
@@ -555,7 +773,8 @@ function unavailable(
 function upwardExtension(current: string, previous: string): string {
   const value = new Decimal(current);
   const baseline = new Decimal(previous);
-  if (!value.isPositive() || !baseline.isPositive()) throw new Error('Invalid replay price baseline');
+  if (!value.isPositive() || !baseline.isPositive())
+    throw new Error('Invalid replay price baseline');
   const extension = value.div(baseline).minus(1);
   return extension.isNegative() ? '0' : extension.toString();
 }

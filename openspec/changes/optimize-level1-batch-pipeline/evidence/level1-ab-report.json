@@ -1,0 +1,48 @@
+{
+  "generated_at": "2026-08-21T23:29:54.202Z",
+  "method": {
+    "database": "server SQLite opened readonly inside the existing app container",
+    "script": "scripts/level1-budget-model.mjs streamed over SSH stdin",
+    "server_files_written": false,
+    "database_mutated": false,
+    "comparison": "legacy per-pool pools+trades path versus batch screening plus capacity-bound finalist trades"
+  },
+  "chains": {
+    "sol": {
+      "candidate_cycles": 7520,
+      "safety_pass_with_pool": 7472,
+      "batch_snapshot_matched": 6943,
+      "structural_complete": 6918,
+      "attention_ever_pass": 1654,
+      "legacy_ever_armed": 5,
+      "legacy_armed_preserved_by_structural": 5,
+      "unexplained_legacy_armed_loss": 0,
+      "buyers_recovery_percent": 18.98,
+      "net_buy_recovery_percent": 5.98,
+      "legacy_rest_calls_per_100_structural": 102,
+      "adaptive_rest_calls_per_100_observed_capacity": 2.07,
+      "observed_rest_call_reduction_percent": 97.97
+    },
+    "bsc": {
+      "candidate_cycles": 5810,
+      "safety_pass_with_pool": 4856,
+      "batch_snapshot_matched": 3957,
+      "structural_complete": 3941,
+      "attention_ever_pass": 915,
+      "legacy_ever_armed": 30,
+      "legacy_armed_preserved_by_structural": 30,
+      "unexplained_legacy_armed_loss": 0,
+      "buyers_recovery_percent": 14.87,
+      "net_buy_recovery_percent": 7.44,
+      "legacy_rest_calls_per_100_structural": 102,
+      "adaptive_rest_calls_per_100_observed_capacity": 2.76,
+      "observed_rest_call_reduction_percent": 97.29
+    }
+  },
+  "acceptance": {
+    "legacy_armed_retention": "pass: no unexplained legacy Armed loss on either chain",
+    "rest_call_reduction": "pass: observed-capacity estimate exceeds the 80 percent reduction target on both chains",
+    "dynamic_first_failure": "pass: material buyers/net-buy recovery confirms these fields must remain ranking and recheck inputs, not permanent rejection gates",
+    "production_claim": "not made: latency, 429 and credit projections still require the configured Shadow sample cohort"
+  }
+}

@@ -137,6 +137,7 @@ export async function requestJson<T>(
       init.signal?.removeEventListener('abort', abortFromCaller);
     }
   }
+  if (lastError instanceof ProviderRequestError) throw lastError;
   const diagnostic: ProviderDiagnostic = {
     provider: options.provider,
     capability: options.capability,

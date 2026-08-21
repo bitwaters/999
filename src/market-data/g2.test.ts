@@ -47,7 +47,10 @@ test('G2 normalizer converts quote-side direction and preserves item legs', () =
     assert.equal(parsed.trade.observedAt, 1_100);
     assert.equal(parsed.trade.itemIndex, 0);
   }
-  assert.equal(normalizeG2Item({ ...raw('buy'), to: 'not-a-number' }, pool, 1_100).status, 'invalid');
+  assert.equal(
+    normalizeG2Item({ ...raw('buy'), to: 'not-a-number' }, pool, 1_100).status,
+    'invalid',
+  );
 });
 
 test('G2 normalizer accepts the live compact side and numeric amount encoding', () => {

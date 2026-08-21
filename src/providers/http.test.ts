@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { gzipSync } from 'node:zlib';
-import { ProviderResponseTooLargeError, requestJson } from './http.js';
+import { ProviderRequestError, ProviderResponseTooLargeError, requestJson } from './http.js';
 
 const options = {
   provider: 'test',
@@ -37,6 +37,27 @@ test('retries 429 using the provider reset hint and returns diagnostics', async 
   assert.equal(calls, 2);
 });
 
+test('final 429 preserves reset diagnostics for the shared scheduler', async () => {
+  await assert.rejects(
+    requestJson<Record<string, unknown>>(
+      'https://provider.invalid/test',
+      {},
+      {
+        ...options,
+        maxAttempts: 1,
+        fetchImpl: async () =>
+          new Response('busy', { status: 429, headers: { 'retry-after': '2' } }),
+      },
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof ProviderRequestError);
+      assert.equal(error.diagnostic.status, 429);
+      assert.equal(error.diagnostic.retryAfterMs, 2_000);
+      return true;
+    },
+  );
+});
+
 test('rejects oversized responses before JSON parsing', async () => {
   await assert.rejects(
     () =>
@@ -49,6 +70,34 @@ test('rejects oversized responses before JSON parsing', async () => {
       error instanceof ProviderResponseTooLargeError &&
       error.code === 'PROVIDER_RESPONSE_TOO_LARGE',
   );
+});
+
+test('aborts a provider request when its configured timeout expires', async () => {
+  let aborted = false;
+  await assert.rejects(
+    requestJson<Record<string, unknown>>(
+      'https://example.invalid/slow',
+      {},
+      {
+        ...options,
+        timeoutMs: 5,
+        maxAttempts: 1,
+        fetchImpl: (_url, init) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              'abort',
+              () => {
+                aborted = true;
+                reject(init.signal?.reason);
+              },
+              { once: true },
+            );
+          }),
+      },
+    ),
+    /Provider request failed/u,
+  );
+  assert.equal(aborted, true);
 });
 
 test('does not retry a caller cancellation', async () => {

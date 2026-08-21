@@ -134,9 +134,7 @@ function normalizeToken(chain: 'sol' | 'bsc', value: unknown): string | undefine
 }
 
 function readInteger(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
-    ? value
-    : undefined;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

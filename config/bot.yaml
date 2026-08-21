@@ -30,6 +30,26 @@ providers:
     rest_requests_per_minute: 500
     monthly_credits: 500000
     max_pools_per_batch: 50
+    scheduler:
+      max_due_pools_per_chain: 200
+      batch_concurrency: 2
+      finalist_trades_concurrency: 4
+      merge_delay_ms: 300
+      cache_ttl_seconds: 10
+      dynamic_recheck_seconds: 10
+      key_refresh_seconds: 60
+      max_dynamic_wait_seconds: 60
+      reservation_ttl_seconds: 45
+      initialization_retry:
+        max_attempts: 2
+        base_delay_ms: 250
+        max_delay_ms: 1000
+      deadline_promotion_seconds: 45
+      confirmation_reserved_percent: 20
+      outcome_reserved_percent: 20
+      backlog_high_watermark: 300
+      backlog_hard_limit: 400
+      shutdown_drain_ms: 5000
     credit_buckets:
       pool_screening_percent: 25
       g2_confirmation_percent: 35
@@ -67,7 +87,6 @@ chains:
         bundler_rate: { enabled: false, verified: false, max: 0.2 }
         rug_ratio: { enabled: false, verified: false, max: 0.2 }
     level1:
-      merge_delay_ms: 300
       refresh_interval_seconds: 45
       buyers_freshness_seconds: 45
     newborn:
@@ -101,7 +120,6 @@ chains:
         dev_team_hold_rate: { enabled: false, verified: false, max: 0.1 }
         rug_ratio: { enabled: false, verified: false, max: 0.2 }
     level1:
-      merge_delay_ms: 300
       refresh_interval_seconds: 45
       buyers_freshness_seconds: 45
     newborn:

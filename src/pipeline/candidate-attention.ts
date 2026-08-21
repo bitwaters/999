@@ -8,7 +8,8 @@ export function evaluateCandidateAttention(
 ): ReturnType<typeof evaluateAttention> {
   const decisions = attentionInputs(evidence).map((input) => evaluateAttention(input, config));
   if (decisions.length === 0) return { status: 'incomplete', reasons: ['missing:attention'] };
-  if (decisions.some((decision) => decision.status === 'pass')) return { status: 'pass', reasons: [] };
+  if (decisions.some((decision) => decision.status === 'pass'))
+    return { status: 'pass', reasons: [] };
   const reasons = [...new Set(decisions.flatMap((decision) => decision.reasons))];
   if (decisions.some((decision) => decision.status === 'incomplete'))
     return { status: 'incomplete', reasons: reasons.length > 0 ? reasons : ['missing:attention'] };

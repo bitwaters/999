@@ -4,6 +4,7 @@ import { parsePool, selectPrimaryPool } from '../market-data/pools.js';
 import {
   latestTradeAt,
   level1RawForPool,
+  level1ScreeningRawForPool,
   poolRawForAddress,
   poolRawsForToken,
   tokenAddressFromCoinGeckoItem,
@@ -129,6 +130,46 @@ test('maps pool snapshots and trades to a fresh Level 1 raw record', () => {
     buyers: 5,
     volume_usd: '250.25',
   });
+});
+
+test('maps verified batch fields without manufacturing migration or trade time', () => {
+  const attributes = {
+    transactions: Object.fromEntries(
+      ['m5', 'm15', 'm30'].map((key) => [key, { buys: 4, sells: 3, buyers: 5, sellers: 4 }]),
+    ),
+    volume_usd: { m5: '250', m15: '500', m30: '750' },
+    buy_volume_usd: { m5: '150', m15: '300', m30: '450' },
+    sell_volume_usd: { m5: '100', m15: '200', m30: '300' },
+    net_buy_volume_usd: { m5: '50', m15: '100', m30: '150' },
+    base_token_price_usd: '1.25',
+    base_token_balance: '800',
+    quote_token_balance: '1000',
+  };
+  const parsedPool = parsePool(
+    {
+      pool_address: pool,
+      base_token_address: token,
+      quote_token_address: 'USDC111',
+      reserve_usd: '1000',
+      volume_usd_24h: '5000',
+      trades_24h: 10,
+      pool_created_at: 0,
+      rest_supported: true,
+      g2_supported: true,
+    },
+    'sol',
+    token,
+  );
+  assert.equal(parsedPool.status, 'complete');
+  if (parsedPool.status !== 'complete') return;
+  const screening = level1ScreeningRawForPool(
+    { pool_address: pool, reserve_usd: '1000' },
+    parsedPool.pool,
+    attributes,
+  );
+  assert.equal(screening.last_trade_at, undefined);
+  assert.equal(screening.migration, undefined);
+  assert.equal(((screening.windows as Record<string, Record<string, unknown>>).m5 ?? {}).buyers, 5);
 });
 
 test('matches BSC token and pool addresses without depending on checksum casing', () => {

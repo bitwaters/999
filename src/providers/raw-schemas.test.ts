@@ -46,9 +46,7 @@ test('parses independent GMGN capability shapes without coercing types', () => {
     true,
   );
   assert.throws(() => gmgnSecurityRawSchema.parse([]));
-  assert.throws(() =>
-    gmgnSecurityRawSchema.parse({ code: 0, data: { renounced_mint: true } }),
-  );
+  assert.throws(() => gmgnSecurityRawSchema.parse({ code: 0, data: { renounced_mint: true } }));
 });
 
 test('validates G2 and 30-second OHLCV raw fixtures', () => {

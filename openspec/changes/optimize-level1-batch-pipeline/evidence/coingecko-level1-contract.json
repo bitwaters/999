@@ -1,0 +1,69 @@
+{
+  "tested_at": "2026-08-21T22:55:00.238Z",
+  "execution": {
+    "method": "local script streamed to the existing server container over stdin",
+    "server_files_written": false,
+    "database_mutated": false,
+    "script": "scripts/coingecko-level1-contract.mjs"
+  },
+  "summary": {
+    "total_requests": 26,
+    "passed": 26,
+    "failed": 0
+  },
+  "key": {
+    "plan": "Analyst",
+    "rpm": 500,
+    "monthly_credit": 500000,
+    "calls_before": 130111,
+    "calls_after": 130177,
+    "measured_credit_delta": 66
+  },
+  "chains": {
+    "solana": {
+      "batch_50_first_latency_ms": 722,
+      "batch_50_after_11s_latency_ms": 669,
+      "batch_50_count": 50,
+      "missing_m5_m15_m30_window_count": 0,
+      "all_have_volume_breakdown": true,
+      "all_have_composition": true,
+      "launchpad_attribute_count": 0,
+      "launchpad_relationship_count": 0,
+      "included_types": ["token", "dex"],
+      "mixed_known_unknown_requested": 2,
+      "mixed_known_unknown_returned": 1,
+      "known_returned": true,
+      "unknown_returned": false,
+      "mutable_payload_changed_after_11s": true,
+      "concurrency_2_elapsed_ms": 538,
+      "concurrency_4_elapsed_ms": 439
+    },
+    "bsc": {
+      "batch_50_first_latency_ms": 730,
+      "batch_50_after_11s_latency_ms": 651,
+      "batch_50_count": 50,
+      "missing_m5_m15_m30_window_count": 0,
+      "all_have_volume_breakdown": true,
+      "all_have_composition": true,
+      "launchpad_attribute_count": 0,
+      "launchpad_relationship_count": 0,
+      "included_types": ["token", "dex"],
+      "mixed_known_unknown_requested": 2,
+      "mixed_known_unknown_returned": 1,
+      "known_returned": true,
+      "unknown_returned": false,
+      "mutable_payload_changed_after_11s": true,
+      "concurrency_2_elapsed_ms": 500,
+      "concurrency_4_elapsed_ms": 469
+    }
+  },
+  "contract_conclusions": [
+    "A 50-address pools/multi request is supported for both configured chains.",
+    "m5/m15/m30 transaction windows, volume breakdown, and composition were complete in both 50-pool fixtures.",
+    "Unknown pool addresses are omitted from an otherwise successful response, so results must be joined by normalized address rather than array position.",
+    "Mutable pool data changed after 11 seconds on both chains, supporting a conservative 10-second cache TTL.",
+    "Concurrency 2 and 4 both completed without HTTP errors or 429 in this bounded test.",
+    "launchpad_details was absent from attributes, relationships, and included resources across both 50-pool fixtures even when requested; it is not a universal Level 1 contract field.",
+    "The measured credit delta was 66 for 26 HTTP requests, so request count must not be treated as credit count."
+  ]
+}

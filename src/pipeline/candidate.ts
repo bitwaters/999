@@ -54,7 +54,12 @@ export class CandidateCycleTracker {
       throw new Error('Candidate TTL must be a positive integer');
   }
 
-  restore(cycle: Pick<CandidateCycle, 'chain' | 'tokenAddress' | 'cycleStartedAt' | 'firstSeenAt' | 'lastSeenAt' | 'status'>): void {
+  restore(
+    cycle: Pick<
+      CandidateCycle,
+      'chain' | 'tokenAddress' | 'cycleStartedAt' | 'firstSeenAt' | 'lastSeenAt' | 'status'
+    >,
+  ): void {
     if (
       !Number.isSafeInteger(cycle.cycleStartedAt) ||
       !Number.isSafeInteger(cycle.firstSeenAt) ||

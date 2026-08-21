@@ -44,7 +44,6 @@ const establishedSchema = z
 
 const level1Schema = z
   .object({
-    merge_delay_ms: z.number().int().min(200).max(500),
     refresh_interval_seconds: z.number().int().min(30).max(60),
     buyers_freshness_seconds: z.number().int().positive(),
   })
@@ -147,6 +146,32 @@ const providerSchema = z
         rest_requests_per_minute: z.number().int().positive(),
         monthly_credits: z.number().int().positive(),
         max_pools_per_batch: z.literal(50),
+        scheduler: z
+          .object({
+            max_due_pools_per_chain: z.number().int().min(50),
+            batch_concurrency: z.number().int().min(1).max(8),
+            finalist_trades_concurrency: z.number().int().min(1).max(8),
+            merge_delay_ms: z.number().int().min(200).max(500),
+            cache_ttl_seconds: z.number().int().min(1).max(30),
+            dynamic_recheck_seconds: z.number().int().min(1).max(60),
+            key_refresh_seconds: z.number().int().min(30).max(600),
+            max_dynamic_wait_seconds: z.number().int().min(10).max(300),
+            reservation_ttl_seconds: z.number().int().min(10).max(120),
+            initialization_retry: z
+              .object({
+                max_attempts: z.number().int().min(1).max(3),
+                base_delay_ms: z.number().int().positive(),
+                max_delay_ms: z.number().int().positive(),
+              })
+              .strict(),
+            deadline_promotion_seconds: z.number().int().min(10).max(120),
+            confirmation_reserved_percent: z.number().int().min(0).max(100),
+            outcome_reserved_percent: z.number().int().min(0).max(100),
+            backlog_high_watermark: z.number().int().positive(),
+            backlog_hard_limit: z.number().int().positive(),
+            shutdown_drain_ms: z.number().int().min(1000).max(30000),
+          })
+          .strict(),
         credit_buckets: z
           .object({
             pool_screening_percent: z.number().int().nonnegative(),
@@ -158,7 +183,7 @@ const providerSchema = z
           .strict(),
         g2: z
           .object({
-            max_sockets: z.number().int().positive(),
+            max_sockets: z.literal(1),
             max_subscriptions_per_socket: z.number().int().positive(),
             rolling_credits_per_message_upper_bound: decimal,
           })
@@ -306,6 +331,42 @@ export const configSchema = z
         code: 'custom',
         path: ['providers', 'coingecko', 'credit_buckets'],
         message: 'Credit bucket percentages must total 100',
+      });
+
+    const scheduler = config.providers.coingecko.scheduler;
+    if (scheduler.confirmation_reserved_percent + scheduler.outcome_reserved_percent >= 100)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['providers', 'coingecko', 'scheduler'],
+        message: 'Scheduler reserved percentages must leave shared capacity',
+      });
+    if (scheduler.backlog_high_watermark >= scheduler.backlog_hard_limit)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['providers', 'coingecko', 'scheduler'],
+        message: 'Scheduler backlog requires high < hard',
+      });
+    if (scheduler.dynamic_recheck_seconds > scheduler.max_dynamic_wait_seconds)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['providers', 'coingecko', 'scheduler'],
+        message: 'Dynamic recheck must not exceed maximum wait',
+      });
+    if (scheduler.initialization_retry.base_delay_ms > scheduler.initialization_retry.max_delay_ms)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['providers', 'coingecko', 'scheduler', 'initialization_retry'],
+        message: 'Initialization retry requires base <= max delay',
+      });
+    const buyersFreshness = Math.min(
+      config.chains.sol.level1.buyers_freshness_seconds,
+      config.chains.bsc.level1.buyers_freshness_seconds,
+    );
+    if (scheduler.cache_ttl_seconds > buyersFreshness)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['providers', 'coingecko', 'scheduler', 'cache_ttl_seconds'],
+        message: 'Scheduler cache TTL must not exceed chain buyers freshness',
       });
 
     if (

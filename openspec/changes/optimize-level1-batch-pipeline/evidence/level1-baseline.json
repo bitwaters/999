@@ -1,0 +1,84 @@
+{
+  "captured_at": "2026-08-21",
+  "method": "read-only SQLite and container log queries",
+  "server_commit": "9e5819e",
+  "database_mutated": false,
+  "scope": {
+    "first_event_at": 1787325991039,
+    "last_event_at": 1787352614780,
+    "coingecko_key_elapsed_ms": 26607356
+  },
+  "full_serial_level1_cycle": {
+    "definition": "first normal SOL pools.multi response through the last normal SOL/BSC trades.level1 response before the next SOL batch",
+    "samples": 236,
+    "p50_ms": 77075,
+    "p95_ms": 106332,
+    "max_ms": 260284
+  },
+  "chains": {
+    "sol": {
+      "normal_batches": 235,
+      "normal_trades": 8855,
+      "batch_to_last_trade": {
+        "samples": 235,
+        "p50_ms": 42733,
+        "p95_ms": 54950,
+        "max_ms": 105826
+      },
+      "trades_per_batch": {
+        "p50": 49,
+        "p95": 50,
+        "max": 50,
+        "exactly_50_batches": 111,
+        "smaller_batches": 124
+      },
+      "active_snapshot": {
+        "armed": 3,
+        "scouting_safety_pass_level1_checked": 99,
+        "scouting_safety_pass_pool_resolved": 1,
+        "scouting_safety_pass_pool_unresolved": 1,
+        "scouting_safety_pass_safety_checked": 137
+      }
+    },
+    "bsc": {
+      "normal_batches": 226,
+      "normal_trades": 9535,
+      "batch_to_last_trade": {
+        "samples": 225,
+        "p50_ms": 44958,
+        "p95_ms": 53883,
+        "max_ms": 89979
+      },
+      "trades_per_batch": {
+        "p50": 50,
+        "p95": 50,
+        "max": 50,
+        "exactly_50_batches": 142,
+        "smaller_batches": 83
+      },
+      "active_snapshot": {
+        "armed": 25,
+        "scouting_safety_pass_level1_checked": 18,
+        "scouting_safety_pass_pool_resolved": 6,
+        "scouting_safety_pass_pool_unresolved": 9,
+        "scouting_safety_pass_safety_checked": 109
+      }
+    }
+  },
+  "credits": {
+    "key_samples": 241,
+    "monthly_credit": 500000,
+    "rpm": 500,
+    "consumed_delta": 23014,
+    "remaining_at_last_sample": 370220,
+    "observed_burn_per_hour": 3113.7
+  },
+  "errors": {
+    "container_log_429_or_rate_limit_matches": 0
+  },
+  "notes": [
+    "A smaller batch means fewer selected pools, not a failed or incomplete response.",
+    "The pre-change runtime has no explicit scheduler backlog metric; active Candidate counts are retained as the backlog baseline.",
+    "Confirmation-specific pools/trades events were excluded using request_meta_json.endpoint_name."
+  ]
+}

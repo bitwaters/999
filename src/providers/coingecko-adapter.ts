@@ -1,6 +1,7 @@
 import type { RawPool } from '../market-data/pools.js';
 import type { CanonicalPool } from '../market-data/pools.js';
 import type { RawLevel1 } from '../market-data/level1.js';
+import type { RawLevel1Screening } from '../market-data/level1-screening.js';
 import type { Candle } from '../outcomes/evaluation.js';
 import { Decimal } from 'decimal.js';
 import { parseDecimalString, parseInteger } from './parsing.js';
@@ -197,6 +198,51 @@ export function level1RawForPool(
             buys: values.buys,
             buyers: values.buyers,
             volume_usd: volumes[key],
+          },
+        ];
+      }),
+    ),
+  };
+}
+
+export function level1ScreeningRawForPool(
+  item: RawPool,
+  pool: CanonicalPool,
+  attributes: JsonRecord,
+): RawLevel1Screening {
+  const transactions = asRecord(attributes.transactions);
+  const volume = asRecord(attributes.volume_usd);
+  const buyVolume = asRecord(attributes.buy_volume_usd);
+  const sellVolume = asRecord(attributes.sell_volume_usd);
+  const netBuy = asRecord(attributes.net_buy_volume_usd);
+  const priceField = pool.targetSide === 'base' ? 'base_token_price_usd' : 'quote_token_price_usd';
+  return {
+    pool_address: item.pool_address,
+    token_address: pool.tokenAddress,
+    base_token_address: pool.baseTokenAddress,
+    quote_token_address: pool.quoteTokenAddress,
+    target_side: pool.targetSide,
+    rest_supported: pool.restSupported,
+    g2_supported: pool.g2Supported,
+    pool_created_at: pool.poolCreatedAt,
+    reserve_usd: item.reserve_usd,
+    price_usd: attributes[priceField],
+    base_token_balance: attributes.base_token_balance,
+    quote_token_balance: attributes.quote_token_balance,
+    windows: Object.fromEntries(
+      (['m5', 'm15', 'm30'] as const).map((key) => {
+        const window = asRecord(transactions[key]);
+        return [
+          key,
+          {
+            buys: window.buys,
+            sells: window.sells,
+            buyers: window.buyers,
+            sellers: window.sellers,
+            volume_usd: volume[key],
+            buy_volume_usd: buyVolume[key],
+            sell_volume_usd: sellVolume[key],
+            net_buy_usd: netBuy[key],
           },
         ];
       }),

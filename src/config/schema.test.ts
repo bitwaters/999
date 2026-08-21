@@ -16,6 +16,8 @@ test('accepts the complete Shadow configuration', () => {
   assert.equal(loaded.runMode, 'shadow');
   assert.equal(loaded.config.delivery.outcome_anchor_destination, 'admin_private');
   assert.equal(loaded.config.providers.coingecko.max_pools_per_batch, 50);
+  assert.equal(loaded.config.providers.coingecko.scheduler.batch_concurrency, 2);
+  assert.equal(loaded.config.providers.coingecko.scheduler.finalist_trades_concurrency, 4);
   assert.match(loaded.configHash, /^[a-f0-9]{64}$/u);
 });
 
@@ -68,6 +70,21 @@ test('rejects invalid credits and queue watermarks', () => {
   creditBuckets.reserve_percent = 5;
   g2Queue.high_watermark = 10000;
   assert.throws(() => parseConfigText(YAML.stringify(value)), /high < hard/u);
+});
+
+test('rejects invalid CoinGecko scheduler capacity relationships', () => {
+  const value = record(YAML.parse(template));
+  const providers = record(value.providers);
+  const coingecko = record(providers.coingecko);
+  const scheduler = record(coingecko.scheduler);
+  scheduler.confirmation_reserved_percent = 80;
+  assert.throws(() => parseConfigText(YAML.stringify(value)), /leave shared capacity/u);
+  scheduler.confirmation_reserved_percent = 20;
+  scheduler.backlog_high_watermark = 400;
+  assert.throws(() => parseConfigText(YAML.stringify(value)), /high < hard/u);
+  scheduler.backlog_high_watermark = 300;
+  scheduler.cache_ttl_seconds = 46;
+  assert.throws(() => parseConfigText(YAML.stringify(value)), /<=30/u);
 });
 
 test('rejects unsupported GMGN signal types', () => {

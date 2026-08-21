@@ -1,12 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  armedSubscriptionsToRelease,
   canArmG2Candidate,
   evaluateCandidateAttention,
+  expireStaleCandidateRows,
   g2ProbeState,
   latestLevel1ObservedAt,
   selectArmCandidateRows,
   selectLevel1CandidateRows,
+  selectPoolResolutionRows,
   shouldRearmG2Candidate,
 } from './provider-probe.js';
 import { openDatabase } from '../persistence/db.js';
@@ -36,6 +39,18 @@ test('persisted Armed candidates do not require a new Attention increase to rear
   assert.equal(canArmG2Candidate('armed', 'armed', 'rejected'), true);
   assert.equal(canArmG2Candidate('scouting', 'level1_checked', 'incomplete'), false);
   assert.equal(canArmG2Candidate('expired', 'armed', 'pass'), false);
+});
+
+test('G2 reconciliation releases obsolete Armed pools but preserves pending anchors', () => {
+  const active = new Map<string, 'armed' | 'confirmed-pending-anchor'>([
+    ['bsc:old:token', 'armed'],
+    ['bsc:keep:token', 'armed'],
+    ['sol:anchor:token', 'confirmed-pending-anchor'],
+  ]);
+  assert.deepEqual(
+    armedSubscriptionsToRelease(active, new Set(['bsc:keep:token'])),
+    ['bsc:old:token'],
+  );
 });
 
 test('candidate Attention accepts improvement from any allowed discovery source', () => {
@@ -106,7 +121,7 @@ test('Level 1 and G2 selection deduplicate pools and prioritize active candidate
   const level1 = selectLevel1CandidateRows(database, 2);
   assert.deepEqual(
     level1.map((row) => `${row.chain}:${row.pool_address}`),
-    ['bsc:pool-bsc', 'sol:pool-sol'],
+    ['bsc:pool-bsc', 'sol:pool-sol', 'sol:pool-new'],
   );
   assert.equal(new Set(level1.map((row) => row.pool_address)).size, level1.length);
 
@@ -114,6 +129,90 @@ test('Level 1 and G2 selection deduplicate pools and prioritize active candidate
   assert.deepEqual(
     arm.map((row) => `${row.chain}:${row.pool_address}:${row.status}:${row.funnel_status}`),
     ['bsc:pool-bsc:armed:armed', 'sol:pool-sol:armed:armed', 'sol:pool-new:scouting:level1_checked'],
+  );
+  database.close();
+});
+
+test('persisted stale cycles expire without terminating anchor lifecycle rows', () => {
+  const database = openDatabase(':memory:');
+  database
+    .prepare(
+      `INSERT INTO rule_config_versions (config_hash, git_commit, run_mode, yaml_snapshot, created_at)
+       VALUES ('hash', 'commit', 'shadow', 'yaml', 1)`,
+    )
+    .run();
+  const insert = database.prepare(
+    `INSERT INTO candidates
+     (chain, token_address, cycle_started_at, first_seen_at, last_seen_at, status,
+      pool_address, safety_status, safety_json, funnel_status, config_version_id, updated_at)
+     VALUES ('bsc', ?, ?, ?, ?, ?, ?, 'pass', '{}', ?, 1, ?)`,
+  );
+  insert.run('stale-armed', 1, 1, 1_000, 'armed', 'pool-stale', 'armed', 1_000);
+  insert.run(
+    'pending-anchor',
+    2,
+    2,
+    1_000,
+    'confirmed-pending-anchor',
+    'pool-anchor',
+    'confirmed-pending-anchor',
+    1_000,
+  );
+  insert.run('fresh', 3, 3, 19_500, 'scouting', 'pool-fresh', 'level1_checked', 19_500);
+
+  const expired = expireStaleCandidateRows(
+    database,
+    'bsc',
+    20_000,
+    10,
+    { maxRows: 20, maxMs: 100 },
+  );
+  assert.deepEqual(expired, [
+    { chain: 'bsc', tokenAddress: 'stale-armed', poolAddress: 'pool-stale' },
+  ]);
+  assert.deepEqual(
+    database
+      .prepare('SELECT token_address, status, funnel_status FROM candidates ORDER BY id')
+      .all(),
+    [
+      { token_address: 'stale-armed', status: 'expired', funnel_status: 'expired' },
+      {
+        token_address: 'pending-anchor',
+        status: 'confirmed-pending-anchor',
+        funnel_status: 'confirmed-pending-anchor',
+      },
+      { token_address: 'fresh', status: 'scouting', funnel_status: 'level1_checked' },
+    ],
+  );
+  database.close();
+});
+
+test('pool resolution selects only fresh current cycles per chain', () => {
+  const database = openDatabase(':memory:');
+  database
+    .prepare(
+      `INSERT INTO rule_config_versions (config_hash, git_commit, run_mode, yaml_snapshot, created_at)
+       VALUES ('hash', 'commit', 'shadow', 'yaml', 1)`,
+    )
+    .run();
+  const insert = database.prepare(
+    `INSERT INTO candidates
+     (chain, token_address, cycle_started_at, first_seen_at, last_seen_at, status,
+      safety_status, safety_json, funnel_status, config_version_id, updated_at, pool_retry_at)
+     VALUES (?, ?, ?, ?, ?, 'scouting', 'pass', '{}', 'safety_checked', 1, ?, ?)`,
+  );
+  insert.run('bsc', 'same-token', 1, 1, 1_000, 1_000, null);
+  insert.run('bsc', 'same-token', 2, 2, 19_000, 19_000, null);
+  insert.run('bsc', 'retry-later', 3, 3, 19_000, 19_000, 21_000);
+  insert.run('sol', 'other-chain', 4, 4, 19_000, 19_000, null);
+
+  assert.deepEqual(
+    selectPoolResolutionRows(database, 'bsc', 20_000, 10, 50).map((row) => row.id),
+    [2],
+  );
+  assert.deepEqual(
+    selectPoolResolutionRows(database, 'sol', 20_000, 10, 50).map((row) => row.id),
+    [4],
   );
   database.close();
 });

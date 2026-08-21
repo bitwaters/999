@@ -111,7 +111,18 @@ export function canArmG2Candidate(
   return attentionStatus === 'pass' || status === 'armed' || funnelStatus === 'armed';
 }
 
+export function armedSubscriptionsToRelease(
+  active: ReadonlyMap<string, 'armed' | 'confirmed-pending-anchor'>,
+  desiredArmed: ReadonlySet<string>,
+): string[] {
+  return [...active]
+    .filter(([identityKey, state]) => state === 'armed' && !desiredArmed.has(identityKey))
+    .map(([identityKey]) => identityKey)
+    .sort();
+}
+
 type Level1CandidateRow = {
+  id: number;
   chain: 'sol' | 'bsc';
   token_address: string;
   pool_address: string;
@@ -119,27 +130,40 @@ type Level1CandidateRow = {
 
 export function selectLevel1CandidateRows(
   database: SqliteDatabase,
-  limit: number,
+  limitPerChain: number,
 ): Level1CandidateRow[] {
-  if (!Number.isSafeInteger(limit) || limit <= 0) throw new Error('Invalid Level 1 candidate limit');
+  if (!Number.isSafeInteger(limitPerChain) || limitPerChain <= 0)
+    throw new Error('Invalid Level 1 candidate limit');
   return database
     .prepare(
-      `SELECT chain, token_address, pool_address
-       FROM candidates
-       WHERE safety_status = 'pass' AND status != 'expired' AND pool_address IS NOT NULL
-       GROUP BY chain, token_address, pool_address
-       ORDER BY
-         MAX(CASE WHEN status IN ('armed', 'confirmed-pending-anchor', 'delivered') THEN 1 ELSE 0 END) DESC,
-         MAX(updated_at) DESC,
-         chain ASC,
-         pool_address ASC,
-         token_address ASC
-       LIMIT ?`,
+      `WITH current_cycles AS (
+         SELECT id, chain, token_address, pool_address, status, updated_at,
+                ROW_NUMBER() OVER (
+                  PARTITION BY chain, token_address
+                  ORDER BY cycle_started_at DESC, id DESC
+                ) AS cycle_rank
+         FROM candidates
+         WHERE safety_status = 'pass' AND status != 'expired' AND pool_address IS NOT NULL
+       ), ranked AS (
+         SELECT id, chain, token_address, pool_address,
+                ROW_NUMBER() OVER (
+                  PARTITION BY chain
+                  ORDER BY
+                    CASE WHEN status IN ('armed', 'confirmed-pending-anchor', 'delivered')
+                         THEN 1 ELSE 0 END DESC,
+                    updated_at DESC, pool_address ASC, token_address ASC
+                ) AS chain_rank
+         FROM current_cycles WHERE cycle_rank = 1
+       )
+       SELECT id, chain, token_address, pool_address
+       FROM ranked WHERE chain_rank <= ?
+       ORDER BY chain ASC, chain_rank ASC`,
     )
-    .all(limit) as Level1CandidateRow[];
+    .all(limitPerChain) as Level1CandidateRow[];
 }
 
 type ArmCandidateRow = {
+  id: number;
   chain: 'sol' | 'bsc';
   token_address: string;
   pool_address: string;
@@ -147,28 +171,126 @@ type ArmCandidateRow = {
   funnel_status: string;
 };
 
+type PoolResolutionCandidateRow = {
+  id: number;
+  chain: 'sol' | 'bsc';
+  token_address: string;
+  pool_retry_attempt: number;
+};
+
+export function selectPoolResolutionRows(
+  database: SqliteDatabase,
+  chain: 'sol' | 'bsc',
+  now: number,
+  ttlSeconds: number,
+  limit: number,
+): PoolResolutionCandidateRow[] {
+  if (
+    !Number.isSafeInteger(now) ||
+    now < 0 ||
+    !Number.isSafeInteger(ttlSeconds) ||
+    ttlSeconds <= 0 ||
+    !Number.isSafeInteger(limit) ||
+    limit <= 0
+  )
+    throw new Error('Invalid pool resolution selection input');
+  return database
+    .prepare(
+      `WITH current_cycles AS (
+         SELECT id, chain, token_address, pool_retry_attempt, pool_retry_at, updated_at,
+                ROW_NUMBER() OVER (
+                  PARTITION BY chain, token_address
+                  ORDER BY cycle_started_at DESC, id DESC
+                ) AS cycle_rank
+         FROM candidates
+         WHERE chain = ? AND safety_status = 'pass' AND status != 'expired'
+           AND last_seen_at >= ? AND pool_address IS NULL
+           AND (pool_retry_at IS NULL OR pool_retry_at <= ?)
+       )
+       SELECT id, chain, token_address, pool_retry_attempt
+       FROM current_cycles WHERE cycle_rank = 1
+       ORDER BY updated_at ASC, id ASC LIMIT ?`,
+    )
+    .all(chain, now - ttlSeconds * 1000, now, limit) as PoolResolutionCandidateRow[];
+}
+
 export function selectArmCandidateRows(database: SqliteDatabase, limit: number): ArmCandidateRow[] {
   if (!Number.isSafeInteger(limit) || limit <= 0) throw new Error('Invalid G2 candidate limit');
   return database
     .prepare(
-      `SELECT chain, token_address, pool_address,
-              CASE WHEN MAX(CASE WHEN status = 'armed' THEN 1 ELSE 0 END) = 1
-                   THEN 'armed' ELSE 'scouting' END AS status,
-              CASE WHEN MAX(CASE WHEN funnel_status = 'armed' THEN 1 ELSE 0 END) = 1
-                   THEN 'armed' ELSE 'level1_checked' END AS funnel_status
-       FROM candidates
-       WHERE safety_status = 'pass' AND status != 'expired'
-         AND (funnel_status = 'level1_checked' OR status = 'armed')
-       GROUP BY chain, token_address, pool_address
-       ORDER BY
-         MAX(CASE WHEN status IN ('armed', 'confirmed-pending-anchor', 'delivered') THEN 1 ELSE 0 END) DESC,
-         MAX(updated_at) DESC,
-         chain ASC,
-         pool_address ASC,
-         token_address ASC
+      `WITH current_cycles AS (
+         SELECT id, chain, token_address, pool_address, status, funnel_status, updated_at,
+                ROW_NUMBER() OVER (
+                  PARTITION BY chain, token_address
+                  ORDER BY cycle_started_at DESC, id DESC
+                ) AS cycle_rank
+         FROM candidates
+         WHERE safety_status = 'pass' AND status != 'expired' AND pool_address IS NOT NULL
+           AND (funnel_status = 'level1_checked' OR status = 'armed')
+       ), ranked AS (
+         SELECT id, chain, token_address, pool_address, status, funnel_status,
+                ROW_NUMBER() OVER (
+                  PARTITION BY chain
+                  ORDER BY CASE WHEN status = 'armed' THEN 1 ELSE 0 END DESC,
+                           updated_at DESC, pool_address ASC, token_address ASC
+                ) AS chain_rank
+         FROM current_cycles WHERE cycle_rank = 1
+       )
+       SELECT id, chain, token_address, pool_address, status, funnel_status
+       FROM ranked
+       ORDER BY chain_rank ASC, chain ASC
        LIMIT ?`,
     )
     .all(limit) as ArmCandidateRow[];
+}
+
+type ExpiredCandidateIdentity = {
+  chain: 'sol' | 'bsc';
+  tokenAddress: string;
+  poolAddress?: string;
+};
+
+export function expireStaleCandidateRows(
+  database: SqliteDatabase,
+  chain: 'sol' | 'bsc',
+  now: number,
+  ttlSeconds: number,
+  budget: WriteBudget,
+): ExpiredCandidateIdentity[] {
+  if (
+    !Number.isSafeInteger(now) ||
+    now < 0 ||
+    !Number.isSafeInteger(ttlSeconds) ||
+    ttlSeconds <= 0
+  )
+    throw new Error('Invalid candidate expiration input');
+  const cutoff = now - ttlSeconds * 1000;
+  const rows = database
+    .prepare(
+      `SELECT id, token_address, pool_address
+       FROM candidates
+       WHERE chain = ? AND last_seen_at < ?
+         AND status IN ('scouting', 'safety_pending', 'qualified', 'armed', 'rejected', 'incomplete')
+       ORDER BY last_seen_at ASC, id ASC LIMIT ?`,
+    )
+    .all(chain, cutoff, budget.maxRows) as Array<{
+      id: number;
+      token_address: string;
+      pool_address: string | null;
+    }>;
+  if (rows.length === 0) return [];
+  boundedWrite(database, budget, (context) => {
+    const update = database.prepare(
+      `UPDATE candidates SET status = 'expired', funnel_status = 'expired',
+       close_reason = 'discovery_ttl', updated_at = ? WHERE id = ?`,
+    );
+    for (const row of rows) context.addRows(update.run(now, row.id).changes);
+  });
+  return rows.map((row) => ({
+    chain,
+    tokenAddress: row.token_address,
+    ...(row.pool_address === null ? {} : { poolAddress: row.pool_address }),
+  }));
 }
 
 export type ProviderProbeOptions = {
@@ -640,6 +762,14 @@ export class ProviderProbe {
 
   private closeExpired(chain: 'sol' | 'bsc', now: number): void {
     for (const cycle of this.trackers[chain].closeExpired(now)) this.closeCandidate(cycle);
+    const expired = expireStaleCandidateRows(
+      this.options.database,
+      chain,
+      now,
+      this.options.config.chains[chain].discovery.candidate_ttl_seconds,
+      this.options.writeBudget,
+    );
+    for (const identity of expired) this.releaseG2IfUnused(identity);
   }
 
   private closeCandidate(cycle: {
@@ -647,15 +777,44 @@ export class ProviderProbe {
     tokenAddress: string;
     cycleStartedAt: number;
   }): void {
+    const row = this.options.database
+      .prepare(
+        `SELECT pool_address FROM candidates
+         WHERE chain = ? AND token_address = ? AND cycle_started_at = ?`,
+      )
+      .get(cycle.chain, cycle.tokenAddress, cycle.cycleStartedAt) as
+      | { pool_address: string | null }
+      | undefined;
     boundedWrite(this.options.database, this.options.writeBudget, (context) => {
       const info = this.options.database
         .prepare(
-          `UPDATE candidates SET status = 'expired', close_reason = 'discovery_ttl', updated_at = ?
-           WHERE chain = ? AND token_address = ? AND cycle_started_at = ?`,
+          `UPDATE candidates SET status = 'expired', funnel_status = 'expired',
+           close_reason = 'discovery_ttl', updated_at = ?
+           WHERE chain = ? AND token_address = ? AND cycle_started_at = ?
+             AND status IN ('scouting', 'safety_pending', 'qualified', 'armed', 'rejected', 'incomplete')`,
         )
         .run(Date.now(), cycle.chain, cycle.tokenAddress, cycle.cycleStartedAt);
       context.addRows(info.changes);
     });
+    if (row?.pool_address)
+      this.releaseG2IfUnused({
+        chain: cycle.chain,
+        tokenAddress: cycle.tokenAddress,
+        poolAddress: row.pool_address,
+      });
+  }
+
+  private releaseG2IfUnused(identity: ExpiredCandidateIdentity): void {
+    if (!identity.poolAddress) return;
+    const remaining = this.options.database
+      .prepare(
+        `SELECT 1 FROM candidates
+         WHERE chain = ? AND token_address = ? AND pool_address = ? AND status != 'expired'
+         LIMIT 1`,
+      )
+      .get(identity.chain, identity.tokenAddress, identity.poolAddress);
+    if (remaining) return;
+    this.g2Client?.unset(`${identity.chain}:${identity.poolAddress}:${identity.tokenAddress}`);
   }
 
   private async probeCoinGecko(): Promise<void> {
@@ -701,7 +860,7 @@ export class ProviderProbe {
   private async refreshLevel1(key: string): Promise<void> {
     const rows = selectLevel1CandidateRows(
       this.options.database,
-      this.options.config.providers.coingecko.max_pools_per_batch * 2,
+      this.options.config.providers.coingecko.max_pools_per_batch,
     );
     let attempted = 0;
     let complete = 0;
@@ -814,10 +973,11 @@ export class ProviderProbe {
           const info = this.options.database
             .prepare(
               `UPDATE candidates SET funnel_status = 'level1_checked', updated_at = ?
-               WHERE chain = ? AND token_address = ? AND pool_address = ? AND safety_status = 'pass'
+               WHERE id = ? AND chain = ? AND token_address = ? AND pool_address = ?
+                 AND safety_status = 'pass'
                  AND funnel_status != 'armed'`,
             )
-            .run(observedAt, chain, row.token_address, row.pool_address);
+            .run(observedAt, row.id, chain, row.token_address, row.pool_address);
           context.addRows(info.changes);
         });
       }
@@ -836,9 +996,9 @@ export class ProviderProbe {
   private async armEligibleCandidates(key: string): Promise<void> {
     const rows = selectArmCandidateRows(
       this.options.database,
-      this.options.config.providers.coingecko.max_pools_per_batch * 2,
+      this.options.config.providers.coingecko.g2.max_subscriptions_per_socket,
     );
-    const pools: CanonicalPool[] = [];
+    const eligible: Array<{ row: ArmCandidateRow; pool: CanonicalPool }> = [];
     for (const row of rows) {
       if (!shouldRearmG2Candidate(row.status, row.funnel_status)) continue;
       const pool = this.level1Pools.get(`${row.chain}:${row.pool_address}:${row.token_address}`);
@@ -860,9 +1020,9 @@ export class ProviderProbe {
         this.options.config.strategies.emerging_breakout.attention,
       );
       if (!canArmG2Candidate(row.status, row.funnel_status, attention.status)) continue;
-      pools.push(pool);
+      eligible.push({ row, pool });
     }
-    if (pools.length === 0) return;
+    if (eligible.length === 0) return;
     this.g2Client ??= new CoinGeckoG2Client({
       websocketUrl: this.options.config.providers.coingecko.websocket_url,
       apiKey: key,
@@ -874,16 +1034,20 @@ export class ProviderProbe {
       onMessage: (message, observedAt) => this.recordG2Message(message, observedAt),
     });
     await this.g2Client.start();
-    for (const pool of pools) {
+    const desired = new Set(eligible.map(({ pool }) => pool.identityKey));
+    for (const identityKey of armedSubscriptionsToRelease(this.g2Client.active(), desired))
+      this.g2Client.unset(identityKey);
+    for (const { row, pool } of eligible) {
       const result = this.g2Client.request(pool, 'armed');
       if (result === 'rejected_capacity') continue;
       boundedWrite(this.options.database, this.options.writeBudget, (context) => {
         const info = this.options.database
           .prepare(
             `UPDATE candidates SET status = 'armed', funnel_status = 'armed', updated_at = ?
-             WHERE chain = ? AND token_address = ? AND pool_address = ? AND safety_status = 'pass'`,
+             WHERE id = ? AND chain = ? AND token_address = ? AND pool_address = ?
+               AND safety_status = 'pass' AND status != 'expired'`,
           )
-          .run(Date.now(), pool.chain, pool.tokenAddress, pool.poolAddress);
+          .run(Date.now(), row.id, pool.chain, pool.tokenAddress, pool.poolAddress);
         context.addRows(info.changes);
       });
     }
@@ -1549,21 +1713,15 @@ export class ProviderProbe {
       this.options.config.storage.disk_high_water_percent,
     );
     if (disk.highWater) throw new Error('disk:high_water');
-    const rows = this.options.database
-      .prepare(
-        `SELECT id, chain, token_address, pool_retry_attempt FROM candidates
-         WHERE safety_status = 'pass' AND status != 'expired' AND pool_address IS NULL
-           AND (pool_retry_at IS NULL OR pool_retry_at <= ?)
-         ORDER BY updated_at ASC LIMIT ?`,
-      )
-      .all(Date.now(), this.options.config.providers.coingecko.max_pools_per_batch * 2) as Array<{
-      id: number;
-      chain: 'sol' | 'bsc';
-      token_address: string;
-      pool_retry_attempt: number;
-    }>;
     for (const chain of ['sol', 'bsc'] as const) {
-      const chainRows = rows.filter((row) => row.chain === chain);
+      const now = Date.now();
+      const chainRows = selectPoolResolutionRows(
+        this.options.database,
+        chain,
+        now,
+        this.options.config.chains[chain].discovery.candidate_ttl_seconds,
+        this.options.config.providers.coingecko.max_pools_per_batch,
+      );
       const tokens = [...new Set(chainRows.map((row) => row.token_address))].slice(
         0,
         this.options.config.providers.coingecko.max_pools_per_batch,
@@ -1632,14 +1790,16 @@ export class ProviderProbe {
       boundedWrite(this.options.database, this.options.writeBudget, (context) => {
         if (selection.status === 'resolved') {
           const pool = selection.pool;
-          const info = this.options.database
-            .prepare(
-              `UPDATE candidates SET pool_address = ?, target_side = ?, funnel_status = 'pool_resolved',
-               updated_at = ?, pool_retry_attempt = 0, pool_retry_at = NULL
-               WHERE chain = ? AND token_address = ? AND safety_status = 'pass' AND pool_address IS NULL`,
-            )
-            .run(pool.poolAddress, pool.targetSide, observedAt, pool.chain, token);
-          context.addRows(info.changes);
+          const update = this.options.database.prepare(
+            `UPDATE candidates SET pool_address = ?, target_side = ?, funnel_status = 'pool_resolved',
+             updated_at = ?, pool_retry_attempt = 0, pool_retry_at = NULL
+             WHERE id = ? AND safety_status = 'pass' AND status != 'expired'
+               AND pool_address IS NULL`,
+          );
+          for (const row of tokenRows)
+            context.addRows(
+              update.run(pool.poolAddress, pool.targetSide, observedAt, row.id).changes,
+            );
         } else {
           const retryAttempt = Math.max(...tokenRows.map((row) => row.pool_retry_attempt), 0);
           const retryChain = tokenRows[0]?.chain ?? (network === 'solana' ? 'sol' : 'bsc');
@@ -1649,14 +1809,14 @@ export class ProviderProbe {
             this.options.config.chains[retryChain].discovery.unresolved_retry_initial_seconds,
             this.options.config.chains[retryChain].discovery.unresolved_retry_max_seconds,
           );
-          const info = this.options.database
-            .prepare(
-              `UPDATE candidates SET funnel_status = 'pool_unresolved', updated_at = ?,
-               pool_retry_attempt = ?, pool_retry_at = ?
-               WHERE chain = ? AND token_address = ? AND safety_status = 'pass' AND pool_address IS NULL`,
-            )
-            .run(observedAt, retryAttempt + 1, retryAt, retryChain, token);
-          context.addRows(info.changes);
+          const update = this.options.database.prepare(
+            `UPDATE candidates SET funnel_status = 'pool_unresolved', updated_at = ?,
+             pool_retry_attempt = ?, pool_retry_at = ?
+             WHERE id = ? AND safety_status = 'pass' AND status != 'expired'
+               AND pool_address IS NULL`,
+          );
+          for (const row of tokenRows)
+            context.addRows(update.run(observedAt, retryAttempt + 1, retryAt, row.id).changes);
         }
       });
       this.options.logger('info', 'candidate_pool_resolution', {
@@ -2108,9 +2268,9 @@ function readNormalizedTrades(
   });
 }
 
-function dedupePools(
-  rows: Array<{ chain: 'sol' | 'bsc'; token_address: string; pool_address: string }>,
-): Array<{ chain: 'sol' | 'bsc'; token_address: string; pool_address: string }> {
+function dedupePools<T extends { chain: 'sol' | 'bsc'; token_address: string; pool_address: string }>(
+  rows: T[],
+): T[] {
   const seen = new Set<string>();
   return rows.filter((row) => {
     const key = `${row.chain}:${row.chain === 'bsc' ? row.pool_address.toLowerCase() : row.pool_address}`;

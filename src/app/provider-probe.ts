@@ -673,6 +673,9 @@ export class ProviderProbe {
     let attempted = 0;
     let complete = 0;
     for (const chain of ['sol', 'bsc'] as const) {
+      let baselineInMemory = 0;
+      let baselineRestored = 0;
+      let baselineMissing = 0;
       const chainRows = rows
         .filter((row) => row.chain === chain)
         .slice(0, this.options.config.providers.coingecko.max_pools_per_batch);
@@ -764,9 +767,13 @@ export class ProviderProbe {
         );
         if (level1.status !== 'complete') continue;
         complete += 1;
+        const inMemoryPrevious = this.level1Snapshots.get(parsedPool.pool.identityKey);
         const previous =
-          this.level1Snapshots.get(parsedPool.pool.identityKey) ??
+          inMemoryPrevious ??
           this.restorePreviousLevel1Snapshot(chain, row, parsedPool.pool, observedAt);
+        if (inMemoryPrevious) baselineInMemory += 1;
+        else if (previous) baselineRestored += 1;
+        else baselineMissing += 1;
         if (previous) this.previousLevel1Snapshots.set(parsedPool.pool.identityKey, previous);
         this.level1Snapshots.set(parsedPool.pool.identityKey, level1.snapshot);
         this.level1Pools.set(`${chain}:${row.pool_address}:${row.token_address}`, parsedPool.pool);
@@ -781,6 +788,12 @@ export class ProviderProbe {
           context.addRows(info.changes);
         });
       }
+      this.options.logger('info', 'level1_baseline_status', {
+        chain,
+        baseline_in_memory: baselineInMemory,
+        baseline_restored: baselineRestored,
+        baseline_missing: baselineMissing,
+      });
       await delay(60_000 / this.options.config.providers.coingecko.rest_requests_per_minute);
     }
     this.level1 =

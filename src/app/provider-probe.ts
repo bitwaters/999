@@ -100,6 +100,15 @@ export function shouldRearmG2Candidate(status: string, funnelStatus: string): bo
   return status !== 'expired' && (status === 'armed' || funnelStatus === 'level1_checked');
 }
 
+export function canArmG2Candidate(
+  status: string,
+  funnelStatus: string,
+  attentionStatus: 'pass' | 'rejected' | 'incomplete',
+): boolean {
+  if (!shouldRearmG2Candidate(status, funnelStatus)) return false;
+  return attentionStatus === 'pass' || status === 'armed' || funnelStatus === 'armed';
+}
+
 type Level1CandidateRow = {
   chain: 'sol' | 'bsc';
   token_address: string;
@@ -800,7 +809,7 @@ export class ProviderProbe {
         attentionInput(cycle.evidence),
         this.options.config.strategies.emerging_breakout.attention,
       );
-      if (attention.status !== 'pass') continue;
+      if (!canArmG2Candidate(row.status, row.funnel_status, attention.status)) continue;
       pools.push(pool);
     }
     if (pools.length === 0) return;

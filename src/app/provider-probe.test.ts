@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  canArmG2Candidate,
   g2ProbeState,
   latestLevel1ObservedAt,
   selectArmCandidateRows,
@@ -27,6 +28,13 @@ test('G2 re-arms persisted candidates after a process restart', () => {
   assert.equal(shouldRearmG2Candidate('scouting', 'level1_checked'), true);
   assert.equal(shouldRearmG2Candidate('scouting', 'armed'), false);
   assert.equal(shouldRearmG2Candidate('expired', 'armed'), false);
+});
+
+test('persisted Armed candidates do not require a new Attention increase to rearm', () => {
+  assert.equal(canArmG2Candidate('armed', 'armed', 'incomplete'), true);
+  assert.equal(canArmG2Candidate('armed', 'armed', 'rejected'), true);
+  assert.equal(canArmG2Candidate('scouting', 'level1_checked', 'incomplete'), false);
+  assert.equal(canArmG2Candidate('expired', 'armed', 'pass'), false);
 });
 
 test('Level 1 and G2 selection deduplicate pools and prioritize active candidates', () => {

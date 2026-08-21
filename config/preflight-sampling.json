@@ -2,6 +2,7 @@
   "tick_seconds": 60,
   "gmgn": {
     "minimum_interval_ms": 5000,
+    "request_timeout_ms": 20000,
     "trending_intervals": ["1m", "5m"],
     "trending_limit": 20,
     "hot_search_interval": "1m",

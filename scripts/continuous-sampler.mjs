@@ -204,6 +204,15 @@ function gmgn(args) {
       env: { ...process.env, GMGN_API_KEY: gmgnKey },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    let settled = false;
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      setTimeout(() => child.kill('SIGKILL'), 1000).unref();
+      if (!settled) {
+        settled = true;
+        reject(new Error(`GMGN request timeout after ${config.gmgn.request_timeout_ms}ms`));
+      }
+    }, config.gmgn.request_timeout_ms);
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8');
@@ -214,10 +223,24 @@ function gmgn(args) {
     child.stderr.on('data', (chunk) => {
       stderr += chunk;
     });
-    child.on('error', reject);
-    child.on('close', (code) =>
-      code === 0 ? resolve(JSON.parse(stdout)) : reject(new Error(stderr.trim() || `exit ${code}`)),
-    );
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      if (code === 0) {
+        try {
+          resolve(JSON.parse(stdout));
+        } catch (error) {
+          reject(error);
+        }
+      } else reject(new Error(stderr.trim() || `exit ${code}`));
+    });
   });
 }
 

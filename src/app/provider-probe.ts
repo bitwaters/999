@@ -15,7 +15,11 @@ import {
   coingeckoG2RawSchema,
   coingeckoOhlcv30sRawSchema,
 } from '../providers/raw-schemas.js';
-import { CandidateCycleTracker, type DiscoveryObservation } from '../pipeline/candidate.js';
+import {
+  CandidateCycleTracker,
+  unresolvedRetryAt,
+  type DiscoveryObservation,
+} from '../pipeline/candidate.js';
 import { readDiskHealth } from '../runtime/health.js';
 import { evaluateBscSafety, evaluateSolSafety, type SafetyResult } from '../domain/safety.js';
 import { parsePool, selectPrimaryPool, type CanonicalPool } from '../market-data/pools.js';
@@ -1302,14 +1306,16 @@ export class ProviderProbe {
     if (disk.highWater) throw new Error('disk:high_water');
     const rows = this.options.database
       .prepare(
-        `SELECT id, chain, token_address FROM candidates
+        `SELECT id, chain, token_address, pool_retry_attempt FROM candidates
          WHERE safety_status = 'pass' AND status != 'expired' AND pool_address IS NULL
+           AND (pool_retry_at IS NULL OR pool_retry_at <= ?)
          ORDER BY updated_at ASC LIMIT ?`,
       )
-      .all(this.options.config.providers.coingecko.max_pools_per_batch * 2) as Array<{
+      .all(Date.now(), this.options.config.providers.coingecko.max_pools_per_batch * 2) as Array<{
       id: number;
       chain: 'sol' | 'bsc';
       token_address: string;
+      pool_retry_attempt: number;
     }>;
     for (const chain of ['sol', 'bsc'] as const) {
       const chainRows = rows.filter((row) => row.chain === chain);
@@ -1358,7 +1364,12 @@ export class ProviderProbe {
   }
 
   private applyPoolSelections(
-    rows: Array<{ id: number; chain: 'sol' | 'bsc'; token_address: string }>,
+    rows: Array<{
+      id: number;
+      chain: 'sol' | 'bsc';
+      token_address: string;
+      pool_retry_attempt: number;
+    }>,
     response: Record<string, unknown>,
     network: 'solana' | 'bsc',
     observedAt: number,
@@ -1378,18 +1389,28 @@ export class ProviderProbe {
           const pool = selection.pool;
           const info = this.options.database
             .prepare(
-              `UPDATE candidates SET pool_address = ?, target_side = ?, funnel_status = 'pool_resolved', updated_at = ?
+              `UPDATE candidates SET pool_address = ?, target_side = ?, funnel_status = 'pool_resolved',
+               updated_at = ?, pool_retry_attempt = 0, pool_retry_at = NULL
                WHERE chain = ? AND token_address = ? AND safety_status = 'pass' AND pool_address IS NULL`,
             )
             .run(pool.poolAddress, pool.targetSide, observedAt, pool.chain, token);
           context.addRows(info.changes);
         } else {
+          const retryAttempt = Math.max(...tokenRows.map((row) => row.pool_retry_attempt), 0);
+          const retryChain = tokenRows[0]?.chain ?? (network === 'solana' ? 'sol' : 'bsc');
+          const retryAt = unresolvedRetryAt(
+            observedAt,
+            retryAttempt,
+            this.options.config.chains[retryChain].discovery.unresolved_retry_initial_seconds,
+            this.options.config.chains[retryChain].discovery.unresolved_retry_max_seconds,
+          );
           const info = this.options.database
             .prepare(
-              `UPDATE candidates SET funnel_status = 'pool_unresolved', updated_at = ?
+              `UPDATE candidates SET funnel_status = 'pool_unresolved', updated_at = ?,
+               pool_retry_attempt = ?, pool_retry_at = ?
                WHERE chain = ? AND token_address = ? AND safety_status = 'pass' AND pool_address IS NULL`,
             )
-            .run(observedAt, tokenRows[0]?.chain ?? (network === 'solana' ? 'sol' : 'bsc'), token);
+            .run(observedAt, retryAttempt + 1, retryAt, retryChain, token);
           context.addRows(info.changes);
         }
       });

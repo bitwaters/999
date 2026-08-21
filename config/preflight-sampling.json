@@ -12,6 +12,8 @@
   },
   "coingecko": {
     "index_check_every_ticks": 1,
+    "index_retry_initial_seconds": 60,
+    "index_retry_max_seconds": 600,
     "pool_snapshot_every_ticks": 2,
     "usage_check_every_ticks": 30,
     "pending_ttl_minutes": 30,

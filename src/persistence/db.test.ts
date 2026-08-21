@@ -37,7 +37,7 @@ test('runs numbered migration and creates exactly ten business tables', () => {
     'signals',
     'trades',
   ]);
-  assert.equal(schemaVersion(database), 2);
+  assert.equal(schemaVersion(database), 3);
   const outcomeColumns = database.prepare('PRAGMA table_info(outcomes)').all() as Array<{
     name: string;
   }>;
@@ -52,6 +52,7 @@ test('runs numbered migration and creates exactly ten business tables', () => {
   assert.deepEqual(indexes, [
     'candidates_active_idx',
     'candles_identity_idx',
+    'idx_candidates_pool_retry',
     'outbox_due_idx',
     'outcomes_config_time_idx',
     'provider_events_identity_idx',
@@ -101,14 +102,19 @@ test('rejects migration version gaps instead of corrupting schema version', () =
   database.close();
 });
 
-test('upgrades an existing schema with the outcome latency column', () => {
+test('upgrades an existing schema with outcome latency and pool retry columns', () => {
   const database = new Database(':memory:');
   runMigrations(database, migrations.slice(0, 1));
   assert.equal(schemaVersion(database), 1);
   runMigrations(database, migrations);
-  assert.equal(schemaVersion(database), 2);
+  assert.equal(schemaVersion(database), 3);
   const columns = database.prepare('PRAGMA table_info(outcomes)').all() as Array<{ name: string }>;
   assert.ok(columns.some((column) => column.name === 'delivery_to_entry_latency_ms'));
+  const candidateColumns = database.prepare('PRAGMA table_info(candidates)').all() as Array<{
+    name: string;
+  }>;
+  assert.ok(candidateColumns.some((column) => column.name === 'pool_retry_attempt'));
+  assert.ok(candidateColumns.some((column) => column.name === 'pool_retry_at'));
   database.close();
 });
 

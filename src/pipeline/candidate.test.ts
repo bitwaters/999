@@ -104,6 +104,8 @@ test('cheap prefilter is safety-first and unresolved pools receive bounded backo
     'incomplete',
   );
   assert.equal(runCheapPreFilter({ ...base, attentionProgress: false }).status, 'rejected');
+  assert.equal(unresolvedRetryAt(1_000, 0, 30, 300), 31_000);
+  assert.equal(unresolvedRetryAt(1_000, 1, 30, 300), 61_000);
   assert.equal(unresolvedRetryAt(1_000, 10, 30, 300), 301_000);
   assert.equal(isAnchorCooldownActive(2_000, 1_999), true);
   assert.equal(isAnchorCooldownActive(2_000, 2_000), false);

@@ -20,4 +20,12 @@ export const migrations: Migration[] = [
       'utf8',
     ),
   },
+  {
+    version: 3,
+    name: '003_pool_retry_backoff',
+    sql: readFileSync(
+      fileURLToPath(new URL('./migrations/003_pool_retry_backoff.sql', import.meta.url)),
+      'utf8',
+    ),
+  },
 ];

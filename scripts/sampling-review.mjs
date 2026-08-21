@@ -51,8 +51,12 @@ const recentProvider = all(
   recentCutoff,
 );
 const indexing = all(`
-  SELECT chain, COUNT(*) AS attempts, SUM(indexed) AS indexed_count,
-         ROUND(100.0 * SUM(indexed) / COUNT(*), 2) AS indexed_rate_percent,
+  SELECT chain, COUNT(*) AS attempts, COUNT(DISTINCT token_address) AS unique_tokens,
+         SUM(indexed) AS indexed_attempts,
+         COUNT(DISTINCT CASE WHEN indexed = 1 THEN token_address END) AS indexed_tokens,
+         ROUND(100.0 * SUM(indexed) / COUNT(*), 2) AS attempt_indexed_rate_percent,
+         ROUND(100.0 * COUNT(DISTINCT CASE WHEN indexed = 1 THEN token_address END)
+               / COUNT(DISTINCT token_address), 2) AS unique_indexed_rate_percent,
          ROUND(AVG(indexing_latency_seconds), 1) AS avg_indexing_latency_seconds,
          MAX(indexing_latency_seconds) AS max_indexing_latency_seconds
   FROM indexing_attempts
@@ -62,7 +66,11 @@ const indexing = all(`
 const recentIndexing = all(
   `
   SELECT chain, COUNT(*) AS attempts, SUM(indexed) AS indexed_count,
-         ROUND(100.0 * SUM(indexed) / COUNT(*), 2) AS indexed_rate_percent
+         COUNT(DISTINCT token_address) AS unique_tokens,
+         COUNT(DISTINCT CASE WHEN indexed = 1 THEN token_address END) AS indexed_tokens,
+         ROUND(100.0 * SUM(indexed) / COUNT(*), 2) AS attempt_indexed_rate_percent,
+         ROUND(100.0 * COUNT(DISTINCT CASE WHEN indexed = 1 THEN token_address END)
+               / COUNT(DISTINCT token_address), 2) AS unique_indexed_rate_percent
   FROM indexing_attempts
   WHERE attempted_at >= ?
   GROUP BY chain
@@ -70,6 +78,16 @@ const recentIndexing = all(
 `,
   recentCutoff,
 );
+const discoverySourceCoverage = all(`
+  SELECT c.chain, c.source,
+         COUNT(DISTINCT c.token_address) AS candidate_tokens,
+         COUNT(DISTINCT CASE WHEN p.token_address IS NOT NULL THEN c.token_address END)
+           AS indexed_tokens
+  FROM candidate_observations c
+  LEFT JOIN token_pools p ON p.chain = c.chain AND p.token_address = c.token_address
+  GROUP BY c.chain, c.source
+  ORDER BY c.chain, c.source
+`);
 const credits = all(`
   SELECT observed_at, plan, rpm, monthly_credit, used_credit, remaining_credit
   FROM credit_samples
@@ -104,7 +122,8 @@ const hasProviderFailures = provider.some((row) => Number(row.failures ?? 0) > 0
 const hasInsufficientIndexing =
   indexing.length === 0 ||
   indexing.some(
-    (row) => row.indexed_rate_percent === null || Number(row.indexed_rate_percent) < 95,
+    (row) =>
+      row.unique_indexed_rate_percent === null || Number(row.unique_indexed_rate_percent) < 95,
   );
 const outcomeEvidence = outcomeTables.length
   ? { available: true, tables: outcomeTables.map((row) => row.name) }
@@ -152,6 +171,7 @@ const result = {
   },
   provider,
   indexing,
+  discoverySourceCoverage,
   websocket_events: Number(websocketEvents?.events ?? 0),
   credits: {
     samples: credits.length,

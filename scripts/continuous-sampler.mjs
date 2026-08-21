@@ -417,10 +417,15 @@ async function collectDiscovery(tick) {
 
 function recentCandidates(chain) {
   const cutoff = Date.now() - config.coingecko.pending_ttl_minutes * 60_000;
-  return db
+  const now = Date.now();
+  const candidates = db
     .prepare(
       `
-    SELECT c.token_address, MIN(c.observed_at) AS first_seen_at, MIN(c.created_at) AS created_at
+    SELECT c.token_address, MIN(c.observed_at) AS first_seen_at, MIN(c.created_at) AS created_at,
+           (SELECT COUNT(*) FROM indexing_attempts i
+            WHERE i.chain=c.chain AND i.token_address=c.token_address) AS indexing_attempts,
+           (SELECT MAX(i.attempted_at) FROM indexing_attempts i
+            WHERE i.chain=c.chain AND i.token_address=c.token_address) AS last_indexing_at
     FROM candidate_observations c
     LEFT JOIN token_pools p ON p.chain=c.chain AND p.token_address=c.token_address
     WHERE c.chain=? AND c.observed_at>=? AND p.token_address IS NULL
@@ -429,7 +434,18 @@ function recentCandidates(chain) {
     LIMIT ?
   `,
     )
-    .all(chain, cutoff, config.coingecko.max_tokens_per_chain);
+    .all(chain, cutoff, config.coingecko.max_tokens_per_chain * 20);
+  return candidates
+    .filter((candidate) => {
+      if (candidate.last_indexing_at === null) return true;
+      const attempt = Number(candidate.indexing_attempts ?? 0);
+      const delaySeconds = Math.min(
+        config.coingecko.index_retry_max_seconds,
+        config.coingecko.index_retry_initial_seconds * 2 ** Math.min(Math.max(attempt - 1, 0), 30),
+      );
+      return now >= Number(candidate.last_indexing_at) + delaySeconds * 1000;
+    })
+    .slice(0, config.coingecko.max_tokens_per_chain);
 }
 
 async function collectIndexing() {

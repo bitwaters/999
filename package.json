@@ -13,6 +13,7 @@
     "health:check": "node --import tsx src/app/healthcheck.ts",
     "replay:report": "node scripts/replay-report.mjs",
     "provider:contract": "node --import tsx src/providers/contract-check.ts",
+    "sampling:audit": "node scripts/sampling-audit.mjs",
     "format": "prettier --write package.json tsconfig.json tsconfig.build.json eslint.config.mjs .prettierrc.json config src",
     "format:check": "prettier --check package.json tsconfig.json tsconfig.build.json eslint.config.mjs .prettierrc.json config src",
     "lint": "eslint .",

@@ -10,6 +10,7 @@ import { gmgnTrendingRawSchema } from '../providers/raw-schemas.js';
 import { gmgnHotSearchesRawSchema } from '../providers/raw-schemas.js';
 import { CandidateCycleTracker, type DiscoveryObservation } from '../pipeline/candidate.js';
 import { readDiskHealth } from '../runtime/health.js';
+import { evaluateBscSafety, evaluateSolSafety, type SafetyResult } from '../domain/safety.js';
 
 type ProbeState = 'ok' | 'failed' | 'unknown';
 type ProbeLogger = (
@@ -147,8 +148,8 @@ export class ProviderProbe {
             this.options.config.providers.gmgn.request_timeout_ms,
           );
           const parsed = gmgnTrendingRawSchema.parse(JSON.parse(raw));
-          this.recordGmgnEvent(raw, `market.trending.${interval}`, chain, observedAt);
-          this.ingestTrending(chain, interval, parsed.data.rank, observedAt);
+          const event = this.recordGmgnEvent(raw, `market.trending.${interval}`, chain, observedAt);
+          this.ingestTrending(chain, interval, parsed.data.rank, observedAt, event.id);
           await delay(this.options.config.providers.gmgn.rate_limit.minimum_interval_ms);
         }
 
@@ -168,9 +169,9 @@ export class ProviderProbe {
           this.options.config.providers.gmgn.request_timeout_ms,
         );
         const parsed = gmgnHotSearchesRawSchema.parse(JSON.parse(raw));
-        this.recordGmgnEvent(raw, 'market.hot-searches.1m', chain, observedAt);
+        const event = this.recordGmgnEvent(raw, 'market.hot-searches.1m', chain, observedAt);
         const group = parsed.find((item) => item.chain === chain);
-        this.ingestHotSearches(chain, group?.tokens ?? [], observedAt);
+        this.ingestHotSearches(chain, group?.tokens ?? [], observedAt, event.id);
         this.closeExpired(chain, observedAt);
         if (chain === 'sol')
           await delay(this.options.config.providers.gmgn.rate_limit.minimum_interval_ms);
@@ -187,8 +188,8 @@ export class ProviderProbe {
     capability: string,
     chain: 'sol' | 'bsc',
     observedAt: number,
-  ): void {
-    insertProviderEvent(
+  ): { id: number } {
+    return insertProviderEvent(
       this.options.database,
       {
         provider: 'gmgn',
@@ -212,15 +213,20 @@ export class ProviderProbe {
     interval: '1m' | '5m',
     tokens: Record<string, unknown>[],
     observedAt: number,
+    providerEventId: number,
   ): void {
     tokens.forEach((token, index) => {
-      this.ingestCandidate({
-        chain,
-        tokenAddress: String(token.address ?? token.token_address ?? ''),
-        source: interval === '1m' ? 'trending_1m' : 'trending_5m',
-        observedAt,
-        rank: index + 1,
-      });
+      this.ingestCandidate(
+        {
+          chain,
+          tokenAddress: String(token.address ?? token.token_address ?? ''),
+          source: interval === '1m' ? 'trending_1m' : 'trending_5m',
+          observedAt,
+          rank: index + 1,
+        },
+        token,
+        providerEventId,
+      );
     });
   }
 
@@ -228,24 +234,39 @@ export class ProviderProbe {
     chain: 'sol' | 'bsc',
     tokens: Record<string, unknown>[],
     observedAt: number,
+    providerEventId: number,
   ): void {
     tokens.forEach((token) => {
       const visitingCount = readSafeInteger(token.visiting_count);
-      this.ingestCandidate({
-        chain,
-        tokenAddress: String(token.address ?? token.token_address ?? ''),
-        source: 'hot_searches',
-        observedAt,
-        ...(visitingCount === undefined ? {} : { visitingCount }),
-      });
+      this.ingestCandidate(
+        {
+          chain,
+          tokenAddress: String(token.address ?? token.token_address ?? ''),
+          source: 'hot_searches',
+          observedAt,
+          ...(visitingCount === undefined ? {} : { visitingCount }),
+        },
+        token,
+        providerEventId,
+      );
     });
   }
 
-  private ingestCandidate(observation: DiscoveryObservation): void {
+  private ingestCandidate(
+    observation: DiscoveryObservation,
+    rawToken: Record<string, unknown>,
+    providerEventId: number,
+  ): void {
     if (!observation.tokenAddress) return;
     try {
       const result = this.trackers[observation.chain].ingest(observation);
       const cycle = result.cycle;
+      const safety = this.evaluateSafety(
+        observation.chain,
+        rawToken,
+        providerEventId,
+        observation.observedAt,
+      );
       const existing = this.options.database
         .prepare(
           'SELECT id FROM candidates WHERE chain = ? AND token_address = ? AND cycle_started_at = ?',
@@ -258,8 +279,8 @@ export class ProviderProbe {
             .prepare(
               `INSERT INTO candidates
                (chain, token_address, cycle_started_at, first_seen_at, last_seen_at, status,
-                safety_status, funnel_status, config_version_id, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
+                safety_status, safety_json, funnel_status, config_version_id, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .run(
               cycle.chain,
@@ -268,7 +289,9 @@ export class ProviderProbe {
               cycle.firstSeenAt,
               cycle.lastSeenAt,
               cycle.status,
-              'discovery',
+              safety.status,
+              JSON.stringify(safety),
+              'safety_checked',
               this.options.configVersionId,
               Date.now(),
             );
@@ -276,9 +299,17 @@ export class ProviderProbe {
         } else {
           const info = this.options.database
             .prepare(
-              'UPDATE candidates SET last_seen_at = ?, status = ?, updated_at = ? WHERE id = ?',
+              `UPDATE candidates SET last_seen_at = ?, status = ?, safety_status = ?, safety_json = ?,
+               funnel_status = 'safety_checked', updated_at = ? WHERE id = ?`,
             )
-            .run(cycle.lastSeenAt, cycle.status, Date.now(), existing);
+            .run(
+              cycle.lastSeenAt,
+              cycle.status,
+              safety.status,
+              JSON.stringify(safety),
+              Date.now(),
+              existing,
+            );
           context.addRows(info.changes);
         }
       });
@@ -293,6 +324,22 @@ export class ProviderProbe {
       }
       throw error;
     }
+  }
+
+  private evaluateSafety(
+    chain: 'sol' | 'bsc',
+    raw: Record<string, unknown>,
+    providerEventId: number,
+    checkedAt: number,
+  ): SafetyResult {
+    const context = {
+      checkedAt,
+      providerEventId: String(providerEventId),
+      configVersionId: String(this.options.configVersionId),
+    };
+    return chain === 'sol'
+      ? evaluateSolSafety(raw, this.options.config.chains.sol.safety, context)
+      : evaluateBscSafety(raw, this.options.config.chains.bsc.safety, context);
   }
 
   private closeExpired(chain: 'sol' | 'bsc', now: number): void {

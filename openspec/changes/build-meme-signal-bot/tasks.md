@@ -100,4 +100,4 @@
 - [x] 11.4 实测 CoinGecko G2 quote、多 leg、重复、乱序、重连、每 socket/并发上限、rolling credits per message 和 50 池尾延迟。（当前脚本覆盖的 34 项全部通过）
 - [ ] 11.5 在服务器以 Shadow/admin anchor 部署，持续采集并验证完整率、索引延迟、可执行率、Outcome、credits、磁盘与 replay 让步。（SSH 可达，但服务器未提供本项目仓库/Compose/部署路径，未擅自写入其他项目）
 - [ ] 11.6 基于累计样本完成训练/最近验证切片、参数敏感性、预算模拟和 S1 风险政策人工评审；未通过前保持 Shadow。（只读评审已固化：总样本 145 calls，最近 5 分钟 GMGN 35/0 失败但 BSC indexing 7/300，累计 GMGN 16/84 失败、BSC indexing 8.7%、credits 4 个采样点；无 Outcome 标签，参数敏感性不可估计，S1 全部关闭，结论为 `hold_shadow`）
-- [ ] 11.7 production 配置经本地修改、main/CI 和服务器拉取部署后，核对 commit/config hash/schema/锚点/健康并记录放行结果。
+- [ ] 11.7 production 配置经本地修改、main/CI 和服务器拉取部署后，核对 commit/config hash/schema/锚点/健康并记录放行结果。（本地未配置 `origin`，服务器未提供本项目仓库/Compose 路径，尚不能执行真实部署）

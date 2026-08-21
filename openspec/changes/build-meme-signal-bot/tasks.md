@@ -89,7 +89,7 @@
 - [x] 10.3 实现 SQLite 定时备份、恢复校验、配置化保留和磁盘水位；完全不可写时健康失败并输出 stderr，而不依赖 Outbox。
 - [x] 10.4 创建最小 Dockerfile、Docker Compose、持久化卷、`.env.example` 和 secrets/DB/WAL/log/backup gitignore。
 - [x] 10.5 创建 GitHub Actions，执行 npm ci、lint、typecheck、test、build 和 Docker smoke。
-- [x] 10.6 创建简短 deploy.sh：dirty 检查、ff-only pull、Compose rebuild/start、健康检查；不得包含服务器代码/配置修改逻辑。（`scripts/deploy.sh` 已通过 `bash -n`；本地执行会在无 `origin` 时安全停止，真实服务器部署仍待外部仓库、服务器 `.env` 与部署路径）
+- [x] 10.6 创建简短 deploy.sh：dirty 检查、ff-only pull、Compose rebuild/start、健康检查；不得包含服务器代码/配置修改逻辑。（`scripts/deploy.sh` 已通过 `bash -n`，并兼容面板用户持有、root 执行时的 Git safe.directory；服务器前置检查在缺少 `.env` 时按预期停止）
 - [x] 10.7 创建版本化 replay/report wrapper，限定 clean main 容器运行并只通过 repository 写允许的表。
 
 ## 11. 实施验收与 Shadow 就绪
@@ -98,6 +98,6 @@
 - [x] 11.2 执行全量 lint/typecheck/test/build、migration from empty、Docker smoke、重启恢复、备份恢复和 deploy dirty guard 验收。（本地全量与 Docker smoke 已通过）
 - [ ] 11.3 使用私人 GMGN Key 固化 SOL/BSC 脱敏 fixture，并验证 RPM、并发、reset、封禁、BSC ownership/open-source/tax 与比例量纲。（接口深测 52/52；最新有界边界探针 4 路并发 + 1 秒 pacing 共 14/14 通过，未观察 reset/429/封禁；未主动触发压力封禁，服务端 reset/封禁边界仍未被证实）
 - [x] 11.4 实测 CoinGecko G2 quote、多 leg、重复、乱序、重连、每 socket/并发上限、rolling credits per message 和 50 池尾延迟。（按池列表 m5 活跃度选择合同测试池后，真实合同验收 34/34；GMGN 52/52）
-- [ ] 11.5 在服务器以 Shadow/admin anchor 部署，持续采集并验证完整率、索引延迟、可执行率、Outcome、credits、磁盘与 replay 让步。（服务器已完成 Git 克隆、Compose 校验、镜像构建和临时凭据 healthcheck 烟测；真实 `.env`、长期 Shadow 采样和运行指标仍待配置）
+- [ ] 11.5 在服务器以 Shadow/admin anchor 部署，持续采集并验证完整率、索引延迟、可执行率、Outcome、credits、磁盘与 replay 让步。（服务器已完成 Git 克隆、Compose 校验、生产镜像构建、临时凭据 healthcheck 烟测，以及 Docker 内 lint/typecheck/88 项测试；真实 `.env`、长期 Shadow 采样和运行指标仍待配置）
 - [ ] 11.6 基于累计样本完成训练/最近验证切片、参数敏感性、预算模拟和 S1 风险政策人工评审；未通过前保持 Shadow。（只读评审已固化：总样本 145 calls，最近 5 分钟 GMGN 35/0 失败但 BSC indexing 7/300，累计 GMGN 16/84 失败、BSC indexing 8.7%、credits 4 个采样点；无 Outcome 标签，参数敏感性不可估计，S1 全部关闭，结论为 `hold_shadow`）
 - [ ] 11.7 production 配置经本地修改、main/CI 和服务器拉取部署后，核对 commit/config hash/schema/锚点/健康并记录放行结果。（main 已推送且服务器已按 Git 拉取/构建；尚未配置真实凭据、完成长期 Shadow 验证或获得 production 放行条件）

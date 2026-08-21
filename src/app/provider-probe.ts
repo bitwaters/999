@@ -33,7 +33,7 @@ import {
   toCandle,
 } from '../providers/coingecko-adapter.js';
 import { isLevel1Fresh, parseLevel1Snapshot, type Level1Snapshot } from '../market-data/level1.js';
-import { CoinGeckoG2Client } from '../providers/coingecko-g2.js';
+import { CoinGeckoG2Client, type G2ClientStatus } from '../providers/coingecko-g2.js';
 import { evaluateAttention, evaluateDispatchGuard, type SignalSnapshot } from '../pipeline/ace.js';
 import { createLiveSignal } from './live-signal.js';
 import {
@@ -86,6 +86,14 @@ export function latestLevel1ObservedAt(poolObservedAt: number, tradeObservedAt: 
   )
     throw new Error('Invalid Level 1 evidence timestamp');
   return Math.max(poolObservedAt, tradeObservedAt);
+}
+
+export function g2ProbeState(
+  clientState: G2ClientStatus | undefined,
+  queueIncomplete: boolean,
+): ProbeState {
+  if (queueIncomplete) return 'failed';
+  return clientState ?? 'ok';
 }
 
 export type ProviderProbeOptions = {
@@ -183,7 +191,7 @@ export class ProviderProbe {
           : 'unknown',
       safety: this.safety,
       level1: this.level1,
-      g2: this.g2QueueIncomplete ? 'failed' : (this.g2Client?.status() ?? 'unknown'),
+      g2: g2ProbeState(this.g2Client?.status(), this.g2QueueIncomplete),
       telegram: this.telegram,
       ...(this.lastProbeAt === undefined ? {} : { lastProbeAt: this.lastProbeAt }),
       ...(this.lastError === undefined ? {} : { lastError: this.lastError }),

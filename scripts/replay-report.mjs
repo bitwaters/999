@@ -78,10 +78,19 @@ function discoveryFromEvent(row, payload) {
   });
 }
 
-function poolIdentityMap(rows) {
+function poolIdentityMap(database, start, end, maxScanRows) {
   const pools = new Map();
+  const rows = database
+    .prepare(
+      `SELECT chain, observed_at, payload_encoding, payload
+       FROM provider_events
+       WHERE provider = 'coingecko' AND capability = 'pools.multi.level1'
+         AND observed_at >= ? AND observed_at <= ?
+       ORDER BY observed_at, id LIMIT ?`,
+    )
+    .iterate(start, end, maxScanRows);
   for (const row of rows) {
-    if (row.capability !== 'pools.multi.level1' || !row.chain) continue;
+    if (!row.chain) continue;
     let payload;
     try { payload = decodePayload(row); } catch { continue; }
     for (const item of payload?.data ?? []) {
@@ -129,14 +138,23 @@ async function runReplayCommand(values) {
     const start = integerOption(values, 'start', 0);
     const end = integerOption(values, 'end', cutoff);
     if (end > cutoff) throw new Error('--end cannot exceed --cutoff');
-    const rows = database.prepare(
-      'SELECT provider, capability, chain, token_address, pool_address, observed_at, payload_encoding, payload FROM provider_events WHERE observed_at >= ? AND observed_at <= ? ORDER BY observed_at, id LIMIT ?',
-    ).all(start, end, maxScanRows);
-    if (rows.length === maxScanRows) throw new Error('replay raw event scan reached max_scan_rows');
+    const rows = database
+      .prepare(
+        `SELECT provider, capability, chain, token_address, pool_address, observed_at,
+                payload_encoding, payload
+         FROM provider_events
+         WHERE observed_at >= ? AND observed_at <= ?
+           AND ((provider = 'gmgn' AND capability LIKE 'market.%')
+             OR (provider = 'coingecko' AND capability IN ('pools.multi.level1', 'G2', 'ohlcv.30s', 'trades.level1')))
+         ORDER BY observed_at, id LIMIT ?`,
+      )
+      .iterate(start, end, maxScanRows);
     const discovery = [];
     const evidence = [];
-    const pools = poolIdentityMap(rows);
+    const pools = poolIdentityMap(database, start, end, maxScanRows);
+    let scannedEvents = 0;
     for (const row of rows) {
+      scannedEvents += 1;
       let payload;
       try { payload = decodePayload(row); } catch { continue; }
       discovery.push(...discoveryFromEvent(row, payload));
@@ -188,7 +206,7 @@ async function runReplayCommand(values) {
         return latestObservedAt > cutoff;
       },
     });
-    console.log(JSON.stringify({ ...result, scannedEvents: rows.length, discovery: discovery.length, evidence: evidence.length }));
+    console.log(JSON.stringify({ ...result, scannedEvents, discovery: discovery.length, evidence: evidence.length }));
   } finally {
     database.close();
   }

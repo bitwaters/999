@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { redactSecrets } from './redact.mjs';
+import { isGmgnRateLimitOrBan } from './gmgn-errors.mjs';
 import { sanitizeGmgnFixture } from './gmgn-fixture.mjs';
 
 const root = new URL('../', import.meta.url);
@@ -90,7 +91,9 @@ const results = [];
 async function test(name, args, apiKey) {
   const startedAt = performance.now();
   let lastError;
+  let attempts = 0;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
+    attempts = attempt;
     try {
       const raw = await runCli(args, apiKey);
       const json = JSON.parse(raw);
@@ -108,13 +111,14 @@ async function test(name, args, apiKey) {
       return json;
     } catch (error) {
       lastError = error;
+      if (isGmgnRateLimitOrBan(error?.message)) break;
       if (attempt < 3) await delay(attempt * 1000);
     }
   }
   const result = {
     name,
     ok: false,
-    attempts: 3,
+    attempts,
     latency_ms: Math.round(performance.now() - startedAt),
     error: redactSecrets(String(lastError?.message || lastError), [apiKey]).slice(0, 500),
   };

@@ -3,8 +3,11 @@ import assert from 'node:assert/strict';
 import {
   g2ProbeState,
   latestLevel1ObservedAt,
+  selectArmCandidateRows,
+  selectLevel1CandidateRows,
   shouldRearmG2Candidate,
 } from './provider-probe.js';
+import { openDatabase } from '../persistence/db.js';
 
 test('Level 1 evidence observedAt covers the later pool and trades responses', () => {
   assert.equal(latestLevel1ObservedAt(1_000, 1_250), 1_250);
@@ -24,4 +27,38 @@ test('G2 re-arms persisted candidates after a process restart', () => {
   assert.equal(shouldRearmG2Candidate('scouting', 'level1_checked'), true);
   assert.equal(shouldRearmG2Candidate('scouting', 'armed'), false);
   assert.equal(shouldRearmG2Candidate('expired', 'armed'), false);
+});
+
+test('Level 1 and G2 selection deduplicate pools and prioritize active candidates', () => {
+  const database = openDatabase(':memory:');
+  database
+    .prepare(
+      `INSERT INTO rule_config_versions (config_hash, git_commit, run_mode, yaml_snapshot, created_at)
+       VALUES ('hash', 'commit', 'shadow', 'yaml', 1)`,
+    )
+    .run();
+  const insert = database.prepare(
+    `INSERT INTO candidates
+     (chain, token_address, cycle_started_at, first_seen_at, last_seen_at, status,
+      pool_address, safety_status, safety_json, funnel_status, config_version_id, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'pass', '{}', ?, 1, ?)`,
+  );
+  insert.run('sol', 'sol-new', 1, 1, 1, 'scouting', 'pool-new', 'level1_checked', 900);
+  insert.run('bsc', 'bsc-armed', 2, 2, 2, 'armed', 'pool-bsc', 'armed', 100);
+  insert.run('bsc', 'bsc-armed', 3, 3, 3, 'armed', 'pool-bsc', 'armed', 200);
+  insert.run('sol', 'sol-armed', 4, 4, 4, 'armed', 'pool-sol', 'armed', 50);
+
+  const level1 = selectLevel1CandidateRows(database, 2);
+  assert.deepEqual(
+    level1.map((row) => `${row.chain}:${row.pool_address}`),
+    ['bsc:pool-bsc', 'sol:pool-sol'],
+  );
+  assert.equal(new Set(level1.map((row) => row.pool_address)).size, level1.length);
+
+  const arm = selectArmCandidateRows(database, 3);
+  assert.deepEqual(
+    arm.map((row) => `${row.chain}:${row.pool_address}:${row.status}:${row.funnel_status}`),
+    ['bsc:pool-bsc:armed:armed', 'sol:pool-sol:armed:armed', 'sol:pool-new:scouting:level1_checked'],
+  );
+  database.close();
 });

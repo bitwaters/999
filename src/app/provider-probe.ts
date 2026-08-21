@@ -100,6 +100,66 @@ export function shouldRearmG2Candidate(status: string, funnelStatus: string): bo
   return status !== 'expired' && (status === 'armed' || funnelStatus === 'level1_checked');
 }
 
+type Level1CandidateRow = {
+  chain: 'sol' | 'bsc';
+  token_address: string;
+  pool_address: string;
+};
+
+export function selectLevel1CandidateRows(
+  database: SqliteDatabase,
+  limit: number,
+): Level1CandidateRow[] {
+  if (!Number.isSafeInteger(limit) || limit <= 0) throw new Error('Invalid Level 1 candidate limit');
+  return database
+    .prepare(
+      `SELECT chain, token_address, pool_address
+       FROM candidates
+       WHERE safety_status = 'pass' AND status != 'expired' AND pool_address IS NOT NULL
+       GROUP BY chain, token_address, pool_address
+       ORDER BY
+         MAX(CASE WHEN status IN ('armed', 'confirmed-pending-anchor', 'delivered') THEN 1 ELSE 0 END) DESC,
+         MAX(updated_at) DESC,
+         chain ASC,
+         pool_address ASC,
+         token_address ASC
+       LIMIT ?`,
+    )
+    .all(limit) as Level1CandidateRow[];
+}
+
+type ArmCandidateRow = {
+  chain: 'sol' | 'bsc';
+  token_address: string;
+  pool_address: string;
+  status: string;
+  funnel_status: string;
+};
+
+export function selectArmCandidateRows(database: SqliteDatabase, limit: number): ArmCandidateRow[] {
+  if (!Number.isSafeInteger(limit) || limit <= 0) throw new Error('Invalid G2 candidate limit');
+  return database
+    .prepare(
+      `SELECT chain, token_address, pool_address,
+              CASE WHEN MAX(CASE WHEN status = 'armed' THEN 1 ELSE 0 END) = 1
+                   THEN 'armed' ELSE 'scouting' END AS status,
+              CASE WHEN MAX(CASE WHEN funnel_status = 'armed' THEN 1 ELSE 0 END) = 1
+                   THEN 'armed' ELSE 'level1_checked' END AS funnel_status
+       FROM candidates
+       WHERE safety_status = 'pass' AND status != 'expired'
+         AND (funnel_status = 'level1_checked' OR status = 'armed')
+       GROUP BY chain, token_address, pool_address
+       ORDER BY
+         MAX(CASE WHEN status IN ('armed', 'confirmed-pending-anchor', 'delivered') THEN 1 ELSE 0 END) DESC,
+         MAX(updated_at) DESC,
+         chain ASC,
+         pool_address ASC,
+         token_address ASC
+       LIMIT ?`,
+    )
+    .all(limit) as ArmCandidateRow[];
+}
+
 export type ProviderProbeOptions = {
   config: BotConfig;
   secrets: Record<string, string>;
@@ -595,17 +655,10 @@ export class ProviderProbe {
   }
 
   private async refreshLevel1(key: string): Promise<void> {
-    const rows = this.options.database
-      .prepare(
-        `SELECT chain, token_address, pool_address FROM candidates
-         WHERE safety_status = 'pass' AND status != 'expired' AND pool_address IS NOT NULL
-         ORDER BY updated_at DESC LIMIT ?`,
-      )
-      .all(this.options.config.providers.coingecko.max_pools_per_batch * 2) as Array<{
-      chain: 'sol' | 'bsc';
-      token_address: string;
-      pool_address: string;
-    }>;
+    const rows = selectLevel1CandidateRows(
+      this.options.database,
+      this.options.config.providers.coingecko.max_pools_per_batch * 2,
+    );
     let attempted = 0;
     let complete = 0;
     for (const chain of ['sol', 'bsc'] as const) {
@@ -722,20 +775,10 @@ export class ProviderProbe {
   }
 
   private async armEligibleCandidates(key: string): Promise<void> {
-    const rows = this.options.database
-      .prepare(
-        `SELECT chain, token_address, pool_address, status, funnel_status FROM candidates
-         WHERE safety_status = 'pass' AND status != 'expired'
-           AND (funnel_status = 'level1_checked' OR status = 'armed')
-         ORDER BY updated_at DESC LIMIT ?`,
-      )
-      .all(this.options.config.providers.coingecko.max_pools_per_batch * 2) as Array<{
-        chain: 'sol' | 'bsc';
-        token_address: string;
-        pool_address: string;
-        status: string;
-        funnel_status: string;
-      }>;
+    const rows = selectArmCandidateRows(
+      this.options.database,
+      this.options.config.providers.coingecko.max_pools_per_batch * 2,
+    );
     const pools: CanonicalPool[] = [];
     for (const row of rows) {
       if (!shouldRearmG2Candidate(row.status, row.funnel_status)) continue;

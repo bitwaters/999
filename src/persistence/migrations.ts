@@ -12,4 +12,12 @@ export const migrations: Migration[] = [
       'utf8',
     ),
   },
+  {
+    version: 2,
+    name: '002_outcome_latency',
+    sql: readFileSync(
+      fileURLToPath(new URL('./migrations/002_outcome_latency.sql', import.meta.url)),
+      'utf8',
+    ),
+  },
 ];

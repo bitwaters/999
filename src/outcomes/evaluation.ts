@@ -293,6 +293,7 @@ export function insertOutcome(
     executionReason: string;
     entryEventId?: number;
     entryObservedAt?: number;
+    deliveryToEntryLatencyMs?: number;
     entryPrice?: string;
     deliveryDrift?: string;
     preSendDrift?: string;
@@ -306,8 +307,9 @@ export function insertOutcome(
       .prepare(
         `INSERT INTO outcomes
          (signal_id, config_version_id, anchor_destination, anchor_delivered_at, execution_status, execution_reason,
-          entry_event_id, entry_observed_at, entry_price, delivery_drift, pre_send_drift, horizon_results_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          entry_event_id, entry_observed_at, delivery_to_entry_latency_ms, entry_price, delivery_drift,
+          pre_send_drift, horizon_results_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.signalId,
@@ -318,6 +320,7 @@ export function insertOutcome(
         input.executionReason,
         input.entryEventId ?? null,
         input.entryObservedAt ?? null,
+        input.deliveryToEntryLatencyMs ?? null,
         input.entryPrice ?? null,
         input.deliveryDrift ?? null,
         input.preSendDrift ?? null,

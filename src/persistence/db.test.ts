@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 import { openDatabase, runMigrations, schemaVersion } from './db.js';
+import { migrations } from './migrations.js';
 import { parseConfigText } from '../config/load.js';
 import { readFile } from 'node:fs/promises';
 import { ensureConfigVersion } from './config-versions.js';
@@ -36,7 +37,11 @@ test('runs numbered migration and creates exactly ten business tables', () => {
     'signals',
     'trades',
   ]);
-  assert.equal(schemaVersion(database), 1);
+  assert.equal(schemaVersion(database), 2);
+  const outcomeColumns = database.prepare('PRAGMA table_info(outcomes)').all() as Array<{
+    name: string;
+  }>;
+  assert.ok(outcomeColumns.some((column) => column.name === 'delivery_to_entry_latency_ms'));
   assert.equal(database.pragma('foreign_keys', { simple: true }), 1);
   const indexes = database
     .prepare(
@@ -93,6 +98,17 @@ test('rejects migration version gaps instead of corrupting schema version', () =
     /sequence gap/u,
   );
   assert.equal(schemaVersion(database), 0);
+  database.close();
+});
+
+test('upgrades an existing schema with the outcome latency column', () => {
+  const database = new Database(':memory:');
+  runMigrations(database, migrations.slice(0, 1));
+  assert.equal(schemaVersion(database), 1);
+  runMigrations(database, migrations);
+  assert.equal(schemaVersion(database), 2);
+  const columns = database.prepare('PRAGMA table_info(outcomes)').all() as Array<{ name: string }>;
+  assert.ok(columns.some((column) => column.name === 'delivery_to_entry_latency_ms'));
   database.close();
 });
 

@@ -875,6 +875,7 @@ export class ProviderProbe {
           ...(selectedEntry
             ? {
                 entryObservedAt: selectedEntry.observedAt,
+                deliveryToEntryLatencyMs: selectedEntry.observedAt - row.sent_at,
                 entryPrice: selectedEntry.priceUsd,
                 deliveryDrift: drift(selectedEntry.priceUsd, signal.confirmationPriceUsd),
               }

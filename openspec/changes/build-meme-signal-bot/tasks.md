@@ -26,12 +26,12 @@
 
 ## 4. SOL/BSC 前置安全
 
-- [ ] 4.1 实现 SOL raw-to-canonical safety adapter，只允许 mint/freeze S0 与已验证 SOL S1 白名单。
-- [ ] 4.2 实现 BSC raw-to-canonical safety adapter，只允许 honeypot、ownership、open-source、tax S0 与已验证 BSC S1 白名单。
-- [ ] 4.3 实现 BSC `ownership_renounced` 单一权威映射和冲突处理，不使用 OR 合并 is_renounced/owner。
-- [ ] 4.4 实现 `pass|fatal|policy_reject|incomplete` 判定、字段级原因、checked/expires/provider_event/config_version 追溯和配置升级重算。
-- [ ] 4.5 用 spy/fake provider 验证 fatal/policy_reject 不产生任何 CoinGecko 请求，已启用 S1 缺失为 incomplete，观察字段不改变结果。
-- [ ] 4.6 完成 SOL/BSC 串链与类型漂移契约测试；未有真实 fixture 的 S0 阻止 production，未验证 S1 无法启用。
+- [x] 4.1 实现 SOL raw-to-canonical safety adapter，只允许 mint/freeze S0 与已验证 SOL S1 白名单。
+- [x] 4.2 实现 BSC raw-to-canonical safety adapter，只允许 honeypot、ownership、open-source、tax S0 与已验证 BSC S1 白名单。
+- [x] 4.3 实现 BSC `ownership_renounced` 单一权威映射和冲突处理，不使用 OR 合并 is_renounced/owner。
+- [x] 4.4 实现 `pass|fatal|policy_reject|incomplete` 判定、字段级原因、checked/expires/provider_event/config_version 追溯和配置升级重算。
+- [x] 4.5 用 spy/fake provider 验证 fatal/policy_reject 不产生任何 CoinGecko 请求，已启用 S1 缺失为 incomplete，观察字段不改变结果。
+- [x] 4.6 完成 SOL/BSC 串链与类型漂移契约测试；未有真实 fixture 的 S0 阻止 production，未验证 S1 无法启用。
 
 ## 5. Candidate、主池与 Level 1
 

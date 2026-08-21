@@ -4,7 +4,9 @@ const decimal = z.number().finite().nonnegative();
 const percent = z.number().finite().min(0).max(1);
 const chatId = z.string().regex(/^-?\d+$/u, 'Telegram IDs must be decimal strings');
 const interval = z.enum(['1m', '5m']);
-const enabledThreshold = z.object({ enabled: z.boolean(), max: percent }).strict();
+const enabledThreshold = z
+  .object({ enabled: z.boolean(), verified: z.boolean(), max: percent })
+  .strict();
 
 const discoverySchema = z
   .object({
@@ -45,6 +47,7 @@ const solSafetySchema = z
       .object({
         renounced_mint_required: z.literal(true),
         renounced_freeze_account_required: z.literal(true),
+        verified: z.boolean(),
       })
       .strict(),
     s1: z
@@ -68,6 +71,7 @@ const bscSafetySchema = z
         open_source_required: z.literal(true),
         max_buy_tax: percent,
         max_sell_tax: percent,
+        verified: z.boolean(),
       })
       .strict(),
     s1: z
@@ -300,6 +304,21 @@ export const configSchema = z
       });
     }
 
+    const s1Groups = [
+      ['sol', config.chains.sol.safety.s1],
+      ['bsc', config.chains.bsc.safety.s1],
+    ] as const;
+    for (const [chain, s1] of s1Groups) {
+      for (const [field, threshold] of Object.entries(s1)) {
+        if (threshold.enabled && !threshold.verified)
+          ctx.addIssue({
+            code: 'custom',
+            path: ['chains', chain, 'safety', 's1', field, 'verified'],
+            message: 'Enabled S1 fields must be verified before activation',
+          });
+      }
+    }
+
     const { capacity, high_watermark, hard_limit } = config.runtime.g2_queue;
     if (!(high_watermark < hard_limit && hard_limit <= capacity))
       ctx.addIssue({
@@ -334,6 +353,18 @@ export const configSchema = z
         path: ['delivery'],
         message: 'Shadow mode requires admin_private anchor and disables channel/group',
       });
+    }
+    if (config.global.run_mode === 'production') {
+      const unverifiedS0 = [
+        ['sol', config.chains.sol.safety.s0.verified],
+        ['bsc', config.chains.bsc.safety.s0.verified],
+      ].filter(([, verified]) => !verified);
+      if (unverifiedS0.length > 0)
+        ctx.addIssue({
+          code: 'custom',
+          path: ['chains', 'safety', 's0', 'verified'],
+          message: 'Production requires verified SOL and BSC S0 fixtures',
+        });
     }
     if (
       !config.delivery.admin_private.allowed_user_ids.includes(

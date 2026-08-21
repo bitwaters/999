@@ -56,11 +56,12 @@ chains:
       s0:
         renounced_mint_required: true
         renounced_freeze_account_required: true
+        verified: false
       s1:
-        top_10_holder_rate: { enabled: false, max: 0.25 }
-        dev_team_hold_rate: { enabled: false, max: 0.1 }
-        bundler_rate: { enabled: false, max: 0.2 }
-        rug_ratio: { enabled: false, max: 0.2 }
+        top_10_holder_rate: { enabled: false, verified: false, max: 0.25 }
+        dev_team_hold_rate: { enabled: false, verified: false, max: 0.1 }
+        bundler_rate: { enabled: false, verified: false, max: 0.2 }
+        rug_ratio: { enabled: false, verified: false, max: 0.2 }
     newborn:
       max_age_seconds: 120
       min_g2_observation_seconds: 30
@@ -84,10 +85,11 @@ chains:
         open_source_required: true
         max_buy_tax: 0.05
         max_sell_tax: 0.05
+        verified: false
       s1:
-        top_10_holder_rate: { enabled: false, max: 0.25 }
-        dev_team_hold_rate: { enabled: false, max: 0.1 }
-        rug_ratio: { enabled: false, max: 0.2 }
+        top_10_holder_rate: { enabled: false, verified: false, max: 0.25 }
+        dev_team_hold_rate: { enabled: false, verified: false, max: 0.1 }
+        rug_ratio: { enabled: false, verified: false, max: 0.2 }
     newborn:
       max_age_seconds: 120
       min_g2_observation_seconds: 30

@@ -67,6 +67,24 @@ test('rejects unsupported GMGN signal types', () => {
   assert.throws(() => parseConfigText(YAML.stringify(value)), /14, 15, and 16/u);
 });
 
+test('rejects enabling an unverified S1 field', () => {
+  const value = record(YAML.parse(template));
+  const chains = record(value.chains);
+  const sol = record(chains.sol);
+  const safety = record(sol.safety);
+  const s1 = record(safety.s1);
+  const top10 = record(s1.top_10_holder_rate);
+  top10.enabled = true;
+  assert.throws(() => parseConfigText(YAML.stringify(value)), /must be verified/u);
+});
+
+test('blocks production until both chain S0 fixtures are verified', () => {
+  const value = record(YAML.parse(template));
+  const global = record(value.global);
+  global.run_mode = 'production';
+  assert.throws(() => parseConfigText(YAML.stringify(value)), /verified SOL and BSC S0/u);
+});
+
 test('requires non-blank secret environment values without exposing them', () => {
   const loaded = parseConfigText(template);
   assert.throws(

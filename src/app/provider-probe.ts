@@ -96,6 +96,10 @@ export function g2ProbeState(
   return clientState ?? 'ok';
 }
 
+export function shouldRearmG2Candidate(status: string, funnelStatus: string): boolean {
+  return status !== 'expired' && (status === 'armed' || funnelStatus === 'level1_checked');
+}
+
 export type ProviderProbeOptions = {
   config: BotConfig;
   secrets: Record<string, string>;
@@ -720,17 +724,21 @@ export class ProviderProbe {
   private async armEligibleCandidates(key: string): Promise<void> {
     const rows = this.options.database
       .prepare(
-        `SELECT chain, token_address, pool_address FROM candidates
-         WHERE safety_status = 'pass' AND status != 'expired' AND funnel_status = 'level1_checked'
+        `SELECT chain, token_address, pool_address, status, funnel_status FROM candidates
+         WHERE safety_status = 'pass' AND status != 'expired'
+           AND (funnel_status = 'level1_checked' OR status = 'armed')
          ORDER BY updated_at DESC LIMIT ?`,
       )
       .all(this.options.config.providers.coingecko.max_pools_per_batch * 2) as Array<{
-      chain: 'sol' | 'bsc';
-      token_address: string;
-      pool_address: string;
-    }>;
+        chain: 'sol' | 'bsc';
+        token_address: string;
+        pool_address: string;
+        status: string;
+        funnel_status: string;
+      }>;
     const pools: CanonicalPool[] = [];
     for (const row of rows) {
+      if (!shouldRearmG2Candidate(row.status, row.funnel_status)) continue;
       const pool = this.level1Pools.get(`${row.chain}:${row.pool_address}:${row.token_address}`);
       const cycle = this.trackers[row.chain].get(row.chain, row.token_address);
       const snapshot = pool ? this.level1Snapshots.get(pool.identityKey) : undefined;

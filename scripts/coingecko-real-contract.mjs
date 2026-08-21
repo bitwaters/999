@@ -92,15 +92,17 @@ async function gatherPools(network) {
     for (const item of json.data || []) {
       const address = item?.attributes?.address;
       if (address && !pools.some((pool) => pool.address === address)) {
+        const m5 = item?.attributes?.transactions?.m5 || {};
         pools.push({
           address,
           base: item?.relationships?.base_token?.data?.id?.replace(`${network}_`, ''),
           quote: item?.relationships?.quote_token?.data?.id?.replace(`${network}_`, ''),
+          activity: Number(m5.buys || 0) + Number(m5.sells || 0),
         });
       }
     }
   }
-  return pools.slice(0, 100);
+  return pools.sort((left, right) => right.activity - left.activity).slice(0, 100);
 }
 
 function assertPoolWindows(json, expectedCount) {

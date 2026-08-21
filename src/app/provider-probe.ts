@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gunzipSync } from 'node:zlib';
 import { Decimal } from 'decimal.js';
 import type { BotConfig } from '../config/schema.js';
 import { insertProviderEvent } from '../persistence/provider-events.js';
@@ -763,7 +764,9 @@ export class ProviderProbe {
         );
         if (level1.status !== 'complete') continue;
         complete += 1;
-        const previous = this.level1Snapshots.get(parsedPool.pool.identityKey);
+        const previous =
+          this.level1Snapshots.get(parsedPool.pool.identityKey) ??
+          this.restorePreviousLevel1Snapshot(chain, row, parsedPool.pool, observedAt);
         if (previous) this.previousLevel1Snapshots.set(parsedPool.pool.identityKey, previous);
         this.level1Snapshots.set(parsedPool.pool.identityKey, level1.snapshot);
         this.level1Pools.set(`${chain}:${row.pool_address}:${row.token_address}`, parsedPool.pool);
@@ -838,6 +841,83 @@ export class ProviderProbe {
         context.addRows(info.changes);
       });
     }
+  }
+
+  private restorePreviousLevel1Snapshot(
+    chain: 'sol' | 'bsc',
+    row: { token_address: string; pool_address: string },
+    pool: CanonicalPool,
+    before: number,
+  ): Level1Snapshot | undefined {
+    const poolEvents = this.options.database
+      .prepare(
+        `SELECT observed_at, payload_encoding, payload
+         FROM provider_events
+         WHERE provider = 'coingecko' AND capability = 'pools.multi.level1'
+           AND chain = ? AND observed_at < ?
+         ORDER BY observed_at DESC LIMIT 30`,
+      )
+      .all(chain, before) as Array<{
+      observed_at: number;
+      payload_encoding: 'identity' | 'gzip';
+      payload: Buffer;
+    }>;
+    const tradeEvent = this.options.database
+      .prepare(
+        `SELECT observed_at, payload_encoding, payload
+         FROM provider_events
+         WHERE provider = 'coingecko' AND capability = 'trades.level1'
+           AND chain = ? AND lower(pool_address) = lower(?) AND observed_at < ?
+         ORDER BY observed_at DESC LIMIT 1`,
+      )
+      .get(chain, row.pool_address, before) as
+      | {
+          observed_at: number;
+          payload_encoding: 'identity' | 'gzip';
+          payload: Buffer;
+        }
+      | undefined;
+    if (!tradeEvent) return undefined;
+    let tradePayload: Record<string, unknown>;
+    try {
+      tradePayload = coingeckoTradesRawSchema.parse(
+        JSON.parse(decodeProviderPayload(tradeEvent.payload, tradeEvent.payload_encoding)),
+      );
+    } catch {
+      return undefined;
+    }
+    for (const event of poolEvents) {
+      try {
+        const payload = coingeckoPoolBatchRawSchema.parse(
+          JSON.parse(decodeProviderPayload(event.payload, event.payload_encoding)),
+        );
+        const raw = poolRawForAddress(
+          payload,
+          chain === 'sol' ? 'solana' : 'bsc',
+          row.pool_address,
+          row.token_address,
+        );
+        if (!raw) continue;
+        const parsedPool = parsePool(raw, chain, row.token_address);
+        if (parsedPool.status !== 'complete') continue;
+        const observedAt = Math.max(event.observed_at, tradeEvent.observed_at);
+        const level1 = parseLevel1Snapshot(
+          level1RawForPool(
+            raw,
+            parsedPool.pool,
+            findPoolAttributes(payload, chain === 'sol' ? 'solana' : 'bsc', row.pool_address),
+            observedAt,
+            latestTradeAt(tradePayload),
+          ),
+          parsedPool.pool,
+          observedAt,
+        );
+        if (level1.status === 'complete') return level1.snapshot;
+      } catch {
+        continue;
+      }
+    }
+    return undefined;
   }
 
   private async processOutcomes(key: string): Promise<void> {
@@ -1901,6 +1981,10 @@ function findTradeId(database: SqliteDatabase, trade: NormalizedTrade): number |
 
 function drift(price: string, confirmation: string): string {
   return new Decimal(price).div(new Decimal(confirmation)).minus(1).toString();
+}
+
+function decodeProviderPayload(payload: Buffer, encoding: 'identity' | 'gzip'): string {
+  return (encoding === 'gzip' ? gunzipSync(payload) : payload).toString('utf8');
 }
 
 function readNormalizedTrades(

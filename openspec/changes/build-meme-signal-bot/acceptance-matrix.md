@@ -10,7 +10,7 @@
 | telegram-delivery | allowlist、群组拒绝、retry/429、sending 恢复、非锚点先送达、原子写 | `src/delivery/*.test.ts`；Telegram `getMe`/admin/group 只读预检 | 部分通过：配置频道 chat 不存在 |
 | outcome-evaluation | entry identity/time、entry-partial、revision cutoff、late entry、固定 close、报告分母 | `src/outcomes/*.test.ts` | 通过 |
 | deterministic-replay | clean main、config override、TTL 重建、无前视、隔离写入、backup、让步/失败恢复 | `src/replay/*.test.ts` | 通过（未执行服务器大范围 replay） |
-| runtime-operations | 10 表边界、health/degrade、backup restore、dirty deploy guard、CI/Docker smoke、长期运行入口 | `src/persistence/db.test.ts`、`src/runtime/*.test.ts`、`src/app/main.ts`、`src/app/provider-probe.ts`、`scripts/deploy.sh`、Docker build/run | 部分通过：应用容器已具备长期 runtime foundation，并可由 Compose 等待；真实 provider connectivity probe 可写入 GMGN 原始 discovery 事件，独立原始 Shadow sampler 也可运行。但完整 discovery/safety/Level1/G2/pipeline/delivery/Outcome 尚未接入，仍不是完整长期 Signal/Outcome Bot |
+| runtime-operations | 10 表边界、health/degrade、backup restore、dirty deploy guard、CI/Docker smoke、长期运行入口 | `src/persistence/db.test.ts`、`src/runtime/*.test.ts`、`src/app/main.ts`、`src/app/provider-probe.ts`、`scripts/deploy.sh`、Docker build/run | 部分通过：应用容器已具备长期 runtime foundation，并可由 Compose 等待；真实 provider connectivity/discovery probe 可写入 GMGN Trending/Hot Searches 原始事件与 Candidate Cycle，磁盘高水位会阻止新 discovery，独立原始 Shadow sampler 也可运行。但完整 safety/Level1/G2/pipeline/delivery/Outcome 尚未接入，仍不是完整长期 Signal/Outcome Bot |
 
 ## 真实供应商结果
 

@@ -4,9 +4,12 @@ import { fileURLToPath } from 'node:url';
 import type { BotConfig } from '../config/schema.js';
 import { insertProviderEvent } from '../persistence/provider-events.js';
 import type { SqliteDatabase } from '../persistence/db.js';
-import type { WriteBudget } from '../persistence/write-budget.js';
+import { boundedWrite, type WriteBudget } from '../persistence/write-budget.js';
 import { requestJson, type HttpClientOptions } from '../providers/http.js';
 import { gmgnTrendingRawSchema } from '../providers/raw-schemas.js';
+import { gmgnHotSearchesRawSchema } from '../providers/raw-schemas.js';
+import { CandidateCycleTracker, type DiscoveryObservation } from '../pipeline/candidate.js';
+import { readDiskHealth } from '../runtime/health.js';
 
 type ProbeState = 'ok' | 'failed' | 'unknown';
 type ProbeLogger = (
@@ -27,6 +30,7 @@ export type ProviderProbeOptions = {
   secrets: Record<string, string>;
   database: SqliteDatabase;
   writeBudget: WriteBudget;
+  configVersionId: number;
   logger: ProbeLogger;
 };
 
@@ -43,8 +47,14 @@ export class ProviderProbe {
   private inFlight: Promise<void> | undefined;
   private stopping = false;
   private statusChangeListener: (() => void) | undefined;
+  private readonly trackers: Record<'sol' | 'bsc', CandidateCycleTracker>;
 
-  public constructor(private readonly options: ProviderProbeOptions) {}
+  public constructor(private readonly options: ProviderProbeOptions) {
+    this.trackers = {
+      sol: new CandidateCycleTracker(options.config.chains.sol.discovery.candidate_ttl_seconds),
+      bsc: new CandidateCycleTracker(options.config.chains.bsc.discovery.candidate_ttl_seconds),
+    };
+  }
 
   public start(): void {
     if (this.timer) return;
@@ -113,31 +123,55 @@ export class ProviderProbe {
     const key = this.options.secrets[this.options.config.providers.gmgn.api_key_env];
     if (!key) throw new Error('GMGN secret is not configured');
     try {
+      const disk = readDiskHealth(
+        path.dirname(path.resolve(this.options.config.storage.database_path)),
+        this.options.config.storage.disk_high_water_percent,
+      );
+      if (disk.highWater) throw new Error('disk:high_water');
       for (const chain of ['sol', 'bsc'] as const) {
+        const intervals = this.options.config.chains[chain].discovery.trending_intervals;
+        for (const interval of intervals) {
+          const observedAt = Date.now();
+          const raw = await runGmgn(
+            [
+              'market',
+              'trending',
+              '--chain',
+              chain,
+              '--interval',
+              interval,
+              '--limit',
+              String(this.options.config.chains[chain].discovery.max_candidates),
+            ],
+            key,
+            this.options.config.providers.gmgn.request_timeout_ms,
+          );
+          const parsed = gmgnTrendingRawSchema.parse(JSON.parse(raw));
+          this.recordGmgnEvent(raw, `market.trending.${interval}`, chain, observedAt);
+          this.ingestTrending(chain, interval, parsed.data.rank, observedAt);
+          await delay(this.options.config.providers.gmgn.rate_limit.minimum_interval_ms);
+        }
+
         const observedAt = Date.now();
         const raw = await runGmgn(
-          ['market', 'trending', '--chain', chain, '--interval', '1m', '--limit', '1'],
+          [
+            'market',
+            'hot-searches',
+            '--chain',
+            chain,
+            '--interval',
+            this.options.config.chains[chain].discovery.hot_search_interval,
+            '--limit',
+            String(this.options.config.chains[chain].discovery.max_candidates),
+          ],
           key,
           this.options.config.providers.gmgn.request_timeout_ms,
         );
-        gmgnTrendingRawSchema.parse(JSON.parse(raw));
-        insertProviderEvent(
-          this.options.database,
-          {
-            provider: 'gmgn',
-            capability: 'market.trending.1m',
-            chain,
-            observedAt,
-            schemaVersion: 'gmgn.trending.v1',
-            payload: raw,
-            requestMeta: {
-              endpoint_name: 'market.trending',
-              method: 'cli',
-              response_bytes: Buffer.byteLength(raw),
-            },
-          },
-          this.options.writeBudget,
-        );
+        const parsed = gmgnHotSearchesRawSchema.parse(JSON.parse(raw));
+        this.recordGmgnEvent(raw, 'market.hot-searches.1m', chain, observedAt);
+        const group = parsed.find((item) => item.chain === chain);
+        this.ingestHotSearches(chain, group?.tokens ?? [], observedAt);
+        this.closeExpired(chain, observedAt);
         if (chain === 'sol')
           await delay(this.options.config.providers.gmgn.rate_limit.minimum_interval_ms);
       }
@@ -146,6 +180,139 @@ export class ProviderProbe {
       this.gmgn = 'failed';
       throw error;
     }
+  }
+
+  private recordGmgnEvent(
+    raw: string,
+    capability: string,
+    chain: 'sol' | 'bsc',
+    observedAt: number,
+  ): void {
+    insertProviderEvent(
+      this.options.database,
+      {
+        provider: 'gmgn',
+        capability,
+        chain,
+        observedAt,
+        schemaVersion: 'gmgn.market.v1',
+        payload: raw,
+        requestMeta: {
+          endpoint_name: capability,
+          method: 'cli',
+          response_bytes: Buffer.byteLength(raw),
+        },
+      },
+      this.options.writeBudget,
+    );
+  }
+
+  private ingestTrending(
+    chain: 'sol' | 'bsc',
+    interval: '1m' | '5m',
+    tokens: Record<string, unknown>[],
+    observedAt: number,
+  ): void {
+    tokens.forEach((token, index) => {
+      this.ingestCandidate({
+        chain,
+        tokenAddress: String(token.address ?? token.token_address ?? ''),
+        source: interval === '1m' ? 'trending_1m' : 'trending_5m',
+        observedAt,
+        rank: index + 1,
+      });
+    });
+  }
+
+  private ingestHotSearches(
+    chain: 'sol' | 'bsc',
+    tokens: Record<string, unknown>[],
+    observedAt: number,
+  ): void {
+    tokens.forEach((token) => {
+      const visitingCount = readSafeInteger(token.visiting_count);
+      this.ingestCandidate({
+        chain,
+        tokenAddress: String(token.address ?? token.token_address ?? ''),
+        source: 'hot_searches',
+        observedAt,
+        ...(visitingCount === undefined ? {} : { visitingCount }),
+      });
+    });
+  }
+
+  private ingestCandidate(observation: DiscoveryObservation): void {
+    if (!observation.tokenAddress) return;
+    try {
+      const result = this.trackers[observation.chain].ingest(observation);
+      const cycle = result.cycle;
+      const existing = this.options.database
+        .prepare(
+          'SELECT id FROM candidates WHERE chain = ? AND token_address = ? AND cycle_started_at = ?',
+        )
+        .pluck()
+        .get(cycle.chain, cycle.tokenAddress, cycle.cycleStartedAt);
+      boundedWrite(this.options.database, this.options.writeBudget, (context) => {
+        if (existing === undefined) {
+          const info = this.options.database
+            .prepare(
+              `INSERT INTO candidates
+               (chain, token_address, cycle_started_at, first_seen_at, last_seen_at, status,
+                safety_status, funnel_status, config_version_id, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
+            )
+            .run(
+              cycle.chain,
+              cycle.tokenAddress,
+              cycle.cycleStartedAt,
+              cycle.firstSeenAt,
+              cycle.lastSeenAt,
+              cycle.status,
+              'discovery',
+              this.options.configVersionId,
+              Date.now(),
+            );
+          context.addRows(info.changes);
+        } else {
+          const info = this.options.database
+            .prepare(
+              'UPDATE candidates SET last_seen_at = ?, status = ?, updated_at = ? WHERE id = ?',
+            )
+            .run(cycle.lastSeenAt, cycle.status, Date.now(), existing);
+          context.addRows(info.changes);
+        }
+      });
+      if (result.closedCycle) this.closeCandidate(result.closedCycle);
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith('Invalid')) {
+        this.options.logger('warn', 'candidate_ingest_skipped', {
+          chain: observation.chain,
+          reason: this.safeError(error),
+        });
+        return;
+      }
+      throw error;
+    }
+  }
+
+  private closeExpired(chain: 'sol' | 'bsc', now: number): void {
+    for (const cycle of this.trackers[chain].closeExpired(now)) this.closeCandidate(cycle);
+  }
+
+  private closeCandidate(cycle: {
+    chain: 'sol' | 'bsc';
+    tokenAddress: string;
+    cycleStartedAt: number;
+  }): void {
+    boundedWrite(this.options.database, this.options.writeBudget, (context) => {
+      const info = this.options.database
+        .prepare(
+          `UPDATE candidates SET status = 'expired', close_reason = 'discovery_ttl', updated_at = ?
+           WHERE chain = ? AND token_address = ? AND cycle_started_at = ?`,
+        )
+        .run(Date.now(), cycle.chain, cycle.tokenAddress, cycle.cycleStartedAt);
+      context.addRows(info.changes);
+    });
   }
 
   private async probeCoinGecko(): Promise<void> {
@@ -269,4 +436,8 @@ function redact(value: string, secrets: readonly string[]): string {
         text.replaceAll(secret, '[REDACTED]').replaceAll(encodeURIComponent(secret), '[REDACTED]'),
       value,
     );
+}
+
+function readSafeInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }

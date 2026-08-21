@@ -27,6 +27,7 @@ const providerProbe = new ProviderProbe({
   config: loaded.config,
   secrets,
   database,
+  configVersionId: configVersion.id,
   writeBudget: {
     maxRows: loaded.config.runtime.sqlite.transaction_max_rows,
     maxMs: loaded.config.runtime.sqlite.transaction_max_ms,

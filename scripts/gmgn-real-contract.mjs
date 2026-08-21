@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { redactSecrets } from './redact.mjs';
 
@@ -121,9 +122,32 @@ async function test(name, args, apiKey) {
   return null;
 }
 
-const envText = await readFile(new URL('../.env.preflight', import.meta.url), 'utf8');
-const apiKey = envValue(envText, 'GMGN_API_KEY');
+const envText = await readFile(new URL('../.env.preflight', import.meta.url), 'utf8').catch(
+  () => '',
+);
+const apiKey = process.env.GMGN_API_KEY?.trim() || envValue(envText, 'GMGN_API_KEY');
 if (!apiKey) throw new Error('缺少 GMGN_API_KEY');
+
+const fixtureDir = process.env.GMGN_FIXTURE_DIR ? path.resolve(process.env.GMGN_FIXTURE_DIR) : null;
+
+function sanitizeFixture(value) {
+  if (Array.isArray(value)) return value.map((item) => sanitizeFixture(item));
+  if (!value || typeof value !== 'object') return redactSecrets(value, [apiKey]);
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !/^(authorization|api[_-]?key|access[_-]?token|headers)$/iu.test(key))
+      .map(([key, item]) => [key, sanitizeFixture(item)]),
+  );
+}
+
+async function writeFixture(name, value) {
+  if (!fixtureDir || value === null || value === undefined) return;
+  await mkdir(fixtureDir, { recursive: true });
+  await writeFile(
+    path.join(fixtureDir, name),
+    `${JSON.stringify(sanitizeFixture(value), null, 2)}\n`,
+  );
+}
 
 const samples = {};
 for (const chain of ['sol', 'bsc']) {
@@ -133,15 +157,17 @@ for (const chain of ['sol', 'bsc']) {
       ['market', 'trending', '--chain', chain, '--interval', interval, '--limit', '3'],
       apiKey,
     );
+    if (interval === '1m') await writeFixture(`gmgn-trending-${chain}.json`, json);
     const address = json?.data?.rank?.[0]?.address;
     if (!samples[chain] && address) samples[chain] = address;
   }
   for (const interval of ['1m', '5m', '1h', '6h', '24h']) {
-    await test(
+    const json = await test(
       `hot-searches.${chain}.${interval}`,
       ['market', 'hot-searches', '--chain', chain, '--interval', interval, '--limit', '3'],
       apiKey,
     );
+    if (interval === '1m') await writeFixture(`gmgn-hot-searches-${chain}.json`, json);
   }
   await test(`trenches.${chain}`, ['market', 'trenches', '--chain', chain, '--limit', '2'], apiKey);
   await test(`signals.${chain}`, ['market', 'signal', '--chain', chain], apiKey);
@@ -159,11 +185,12 @@ for (const chain of ['sol', 'bsc']) {
     ['token', 'info', '--chain', chain, '--address', address],
     apiKey,
   );
-  await test(
+  const security = await test(
     `token.security.${chain}`,
     ['token', 'security', '--chain', chain, '--address', address],
     apiKey,
   );
+  await writeFixture(`gmgn-security-${chain}.json`, security);
   await test(
     `token.pool.${chain}`,
     ['token', 'pool', '--chain', chain, '--address', address],

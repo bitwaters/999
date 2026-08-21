@@ -99,5 +99,5 @@
 - [ ] 11.3 使用私人 GMGN Key 固化 SOL/BSC 脱敏 fixture，并验证 RPM、并发、reset、封禁、BSC ownership/open-source/tax 与比例量纲。（服务器私人 Key 合同测试 52/52；有界负载并发 2/2、pacing 4/4，通过且未观察 reset/429/封禁；未主动触发压力封禁，reset/封禁边界仍未被证实）
 - [x] 11.4 实测 CoinGecko G2 quote、多 leg、重复、乱序、重连、每 socket/并发上限、rolling credits per message 和 50 池尾延迟。（按池列表 m5 活跃度选择合同测试池后，真实合同验收 34/34；GMGN 52/52）
 - [ ] 11.5 在服务器以 Shadow/admin anchor 部署，持续采集并验证完整率、索引延迟、可执行率、Outcome、credits、磁盘与 replay 让步。（真实 `.env` 已校验并完成 Compose 启动；sampler 正常运行并已累计短窗口样本，但 app health 因 Level 1 不完整保持失败，持续完整率、Outcome、replay 让步和重启恢复仍未完成）
-- [ ] 11.6 基于累计样本完成训练/最近验证切片、参数敏感性、预算模拟和 S1 风险政策人工评审；未通过前保持 Shadow。（只读评审已固化：总样本 145 calls，最近 5 分钟 GMGN 35/0 失败但 BSC indexing 7/300，累计 GMGN 16/84 失败、BSC indexing 8.7%、credits 4 个采样点；无 Outcome 标签，参数敏感性不可估计，S1 全部关闭，结论为 `hold_shadow`）
+- [ ] 11.6 基于累计样本完成训练/最近验证切片、参数敏感性、预算模拟和 S1 风险政策人工评审；未通过前保持 Shadow。（服务器最新只读评审：总样本 131 provider calls，GMGN 84/84、CoinGecko REST 43/43、WebSocket 4/4 无失败；累计 BSC indexing 41/676=6.07%、SOL 472/475=99.37%，最近 5 分钟 BSC 4/250=1.6%、SOL 181/181=100%；WebSocket events 18，credits 仅 1 个采样点且剩余 393234；无 Outcome 标签，参数敏感性不可估计，预算需人工复核，S1 全部关闭，结论为 `hold_shadow`）
 - [ ] 11.7 production 配置经本地修改、main/CI 和服务器拉取部署后，核对 commit/config hash/schema/锚点/健康并记录放行结果。（main 已推送且服务器已按 Git 拉取/构建，schemaVersion=2、配置解析和 provider 合同通过；runtime health 仍因 Level 1/G2 不完整失败，保持 Shadow，不满足 production 放行）

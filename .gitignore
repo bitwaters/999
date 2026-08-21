@@ -1,0 +1,46 @@
+# Local secrets and environment files. Keep only safe examples versioned.
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Dependencies, build output, coverage, and tool caches.
+node_modules/
+dist/
+coverage/
+.nyc_output/
+.turbo/
+*.tsbuildinfo
+
+# Local runtime, debug, editor, and operating-system artifacts.
+*.log
+*.pid
+*.pid.lock
+*.tmp
+*.temp
+*.swp
+*.swo
+.DS_Store
+debug/
+tmp/
+.tmp/
+
+# Local databases, WAL/SHM files, and generated provider/preflight output.
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+preflight-results/
+sampling-data/
+
+# Local-only development notes and preflight reports.
+开发前验证记录.md
+持续采样说明.md
+真实API契约测试报告.md
+*调试*.md
+*debug*.md
+*验证记录*.md
+*采样说明*.md
+local-docs/
+notes/
+scratch/

@@ -8,12 +8,12 @@
 
 ## 2. SQLite 与可追溯数据模型
 
-- [ ] 2.1 建立 better-sqlite3 WAL 连接、busy timeout、单写者 repository 边界、编号 migration runner，并用 `PRAGMA user_version` 提供 schema version 健康信息而不新增表。
-- [ ] 2.2 创建 10 张表及外键/唯一约束，不创建 reports、health、credits 或额外策略表。
-- [ ] 2.3 为 provider observed time、active Candidate、trade/candle identity、due outbox、Outcome config/time 和 replay run/key 建立并用查询计划验证索引。
-- [ ] 2.4 实现不可变 rule_config_version repository，并在启动时保存或复用 `config_hash + git_commit + run_mode` 完全匹配的配置版本。
-- [ ] 2.5 实现 provider_events 原始 payload 压缩、hash、敏感请求元数据剔除和只追加写入；增加 API key/header 不落库测试。
-- [ ] 2.6 实现配置化批量写入、事务行数/耗时上界和 event-loop lag 监控，超限时向上层返回可判定的 timing incomplete。
+- [x] 2.1 建立 better-sqlite3 WAL 连接、busy timeout、单写者 repository 边界、编号 migration runner，并用 `PRAGMA user_version` 提供 schema version 健康信息而不新增表。
+- [x] 2.2 创建 10 张表及外键/唯一约束，不创建 reports、health、credits 或额外策略表。
+- [x] 2.3 为 provider observed time、active Candidate、trade/candle identity、due outbox、Outcome config/time 和 replay run/key 建立并用查询计划验证索引。
+- [x] 2.4 实现不可变 rule_config_version repository，并在启动时保存或复用 `config_hash + git_commit + run_mode` 完全匹配的配置版本。
+- [x] 2.5 实现 provider_events 原始 payload 压缩、hash、敏感请求元数据剔除和只追加写入；增加 API key/header 不落库测试。
+- [x] 2.6 实现配置化批量写入、事务行数/耗时上界和 event-loop lag 监控，超限时向上层返回可判定的 timing incomplete。
 
 ## 3. Provider 公共能力
 

@@ -1,4 +1,6 @@
 import type { RawPool } from '../market-data/pools.js';
+import type { CanonicalPool } from '../market-data/pools.js';
+import type { RawLevel1 } from '../market-data/level1.js';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -35,6 +37,62 @@ export function poolRawsForToken(
       return allowedIds.size === 0 || (typeof id === 'string' && allowedIds.has(id));
     })
     .map((item) => toRawPool(item, network, tokenAddress));
+}
+
+export function poolRawForAddress(
+  response: JsonRecord,
+  network: 'solana' | 'bsc',
+  poolAddress: string,
+  tokenAddress: string,
+): RawPool | undefined {
+  const item = (Array.isArray(response.data) ? response.data : [])
+    .map(asRecord)
+    .find((candidate) => {
+      const address = asRecord(candidate.attributes).address;
+      return typeof address === 'string' && sameAddress(network, address, poolAddress);
+    });
+  return item ? toRawPool(item, network, tokenAddress) : undefined;
+}
+
+export function latestTradeAt(response: JsonRecord): number | undefined {
+  const timestamps = (Array.isArray(response.data) ? response.data : [])
+    .map((item) => asRecord(asRecord(item).attributes).block_timestamp)
+    .filter((value): value is string => typeof value === 'string')
+    .map((value) => Date.parse(value))
+    .filter((value) => Number.isSafeInteger(value) && value >= 0);
+  return timestamps.length === 0 ? undefined : Math.max(...timestamps);
+}
+
+export function level1RawForPool(
+  item: RawPool,
+  pool: CanonicalPool,
+  attributes: JsonRecord,
+  observedAt: number,
+  lastTradeAt: number | undefined,
+): RawLevel1 {
+  const transactions = asRecord(attributes.transactions);
+  const window = asRecord(transactions.m5);
+  const volume = asRecord(attributes.volume_usd).m5;
+  const netBuy = asRecord(attributes.net_buy_volume_usd).m5;
+  const priceField = pool.targetSide === 'base' ? 'base_token_price_usd' : 'quote_token_price_usd';
+  return {
+    pool_address: item.pool_address,
+    token_address: pool.tokenAddress,
+    pool_status: 'stable',
+    reserve_usd: item.reserve_usd,
+    price_usd: attributes[priceField],
+    buys: window.buys,
+    sells: window.sells,
+    buyers: window.buyers,
+    sellers: window.sellers,
+    volume_usd: volume,
+    net_buy_usd: netBuy,
+    pool_age_seconds:
+      Number.isSafeInteger(pool.poolCreatedAt) && pool.poolCreatedAt <= observedAt
+        ? Math.floor((observedAt - pool.poolCreatedAt) / 1000)
+        : -1,
+    last_trade_at: lastTradeAt,
+  };
 }
 
 function toRawPool(item: JsonRecord, network: 'solana' | 'bsc', tokenAddress: string): RawPool {
@@ -79,6 +137,10 @@ function relationshipAddress(value: unknown, network: 'solana' | 'bsc'): string 
   if (typeof id !== 'string') return undefined;
   const prefix = `${network}_`;
   return id.startsWith(prefix) ? id.slice(prefix.length) : id;
+}
+
+function sameAddress(network: 'solana' | 'bsc', left: string, right: string): boolean {
+  return network === 'bsc' ? left.toLowerCase() === right.toLowerCase() : left === right;
 }
 
 function asRecord(value: unknown): JsonRecord {

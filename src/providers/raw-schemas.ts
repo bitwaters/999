@@ -17,6 +17,7 @@ export const gmgnTokenPoolRawSchema = z
 export const coingeckoPoolBatchRawSchema = z
   .object({ data: z.array(looseObject), included: z.array(looseObject).optional() })
   .passthrough();
+export const coingeckoTradesRawSchema = z.object({ data: z.array(looseObject) }).passthrough();
 export const coingeckoG2RawSchema = z
   .object({ c: z.literal('G2'), n: z.string(), pa: z.string(), ty: z.unknown(), t: z.unknown() })
   .passthrough();

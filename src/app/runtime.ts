@@ -91,9 +91,9 @@ export class BotRuntime {
       clockOffsetMs: 0,
       components: {
         provider: providerStatus.provider,
-        safety: 'unknown',
-        level1: 'unknown',
-        g2: 'unknown',
+        safety: providerStatus.safety,
+        level1: providerStatus.level1,
+        g2: providerStatus.g2,
         telegram: providerStatus.telegram,
         sqlite: 'ok',
         event_loop: lag.incomplete ? 'degraded' : 'ok',

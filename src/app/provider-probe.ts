@@ -7,13 +7,23 @@ import type { SqliteDatabase } from '../persistence/db.js';
 import { boundedWrite, type WriteBudget } from '../persistence/write-budget.js';
 import { requestJson, type HttpClientOptions } from '../providers/http.js';
 import { gmgnTrendingRawSchema } from '../providers/raw-schemas.js';
-import { gmgnHotSearchesRawSchema, coingeckoPoolBatchRawSchema } from '../providers/raw-schemas.js';
+import {
+  gmgnHotSearchesRawSchema,
+  coingeckoPoolBatchRawSchema,
+  coingeckoTradesRawSchema,
+} from '../providers/raw-schemas.js';
 import { CandidateCycleTracker, type DiscoveryObservation } from '../pipeline/candidate.js';
 import { readDiskHealth } from '../runtime/health.js';
 import { evaluateBscSafety, evaluateSolSafety, type SafetyResult } from '../domain/safety.js';
 import { parsePool, selectPrimaryPool, type CanonicalPool } from '../market-data/pools.js';
 import { assertAnalystEndpoint } from '../providers/http.js';
-import { poolRawsForToken } from '../providers/coingecko-adapter.js';
+import {
+  latestTradeAt,
+  level1RawForPool,
+  poolRawForAddress,
+  poolRawsForToken,
+} from '../providers/coingecko-adapter.js';
+import { parseLevel1Snapshot, type Level1Snapshot } from '../market-data/level1.js';
 
 type ProbeState = 'ok' | 'failed' | 'unknown';
 type ProbeLogger = (
@@ -24,6 +34,9 @@ type ProbeLogger = (
 
 export type ProviderProbeStatus = {
   provider: ProbeState;
+  safety: ProbeState;
+  level1: ProbeState;
+  g2: ProbeState;
   telegram: ProbeState;
   lastProbeAt?: number;
   lastError?: string;
@@ -44,6 +57,9 @@ const gmgnCli = path.join(root, 'node_modules', 'gmgn-cli', 'dist', 'index.js');
 export class ProviderProbe {
   private gmgn: ProbeState = 'unknown';
   private coingecko: ProbeState = 'unknown';
+  private safety: ProbeState = 'unknown';
+  private level1: ProbeState = 'unknown';
+  private readonly level1Snapshots = new Map<string, Level1Snapshot>();
   private telegram: ProbeState = 'unknown';
   private lastProbeAt: number | undefined;
   private lastError: string | undefined;
@@ -86,6 +102,9 @@ export class ProviderProbe {
         : providerStates.includes('failed')
           ? 'failed'
           : 'unknown',
+      safety: this.safety,
+      level1: this.level1,
+      g2: 'unknown',
       telegram: this.telegram,
       ...(this.lastProbeAt === undefined ? {} : { lastProbeAt: this.lastProbeAt }),
       ...(this.lastError === undefined ? {} : { lastError: this.lastError }),
@@ -183,8 +202,10 @@ export class ProviderProbe {
         if (chain === 'sol')
           await delay(this.options.config.providers.gmgn.rate_limit.minimum_interval_ms);
       }
+      this.safety = 'ok';
       this.gmgn = 'ok';
     } catch (error) {
+      this.safety = 'failed';
       this.gmgn = 'failed';
       throw error;
     }
@@ -399,11 +420,134 @@ export class ProviderProbe {
         this.options.writeBudget,
       );
       await this.resolveCoinGeckoPools(key);
+      await this.refreshLevel1(key);
       this.coingecko = 'ok';
     } catch (error) {
       this.coingecko = 'failed';
       throw error;
     }
+  }
+
+  private async refreshLevel1(key: string): Promise<void> {
+    const rows = this.options.database
+      .prepare(
+        `SELECT chain, token_address, pool_address FROM candidates
+         WHERE safety_status = 'pass' AND status != 'expired' AND pool_address IS NOT NULL
+         ORDER BY updated_at DESC LIMIT ?`,
+      )
+      .all(this.options.config.providers.coingecko.max_pools_per_batch * 2) as Array<{
+      chain: 'sol' | 'bsc';
+      token_address: string;
+      pool_address: string;
+    }>;
+    let attempted = 0;
+    let complete = 0;
+    for (const chain of ['sol', 'bsc'] as const) {
+      const chainRows = rows
+        .filter((row) => row.chain === chain)
+        .slice(0, this.options.config.providers.coingecko.max_pools_per_batch);
+      const poolRows = dedupePools(chainRows);
+      if (poolRows.length === 0) continue;
+      const network = chain === 'sol' ? 'solana' : 'bsc';
+      const addresses = poolRows.map((row) => row.pool_address);
+      const url = `${this.options.config.providers.coingecko.rest_base_url}/onchain/networks/${network}/pools/multi/${addresses.map(encodeURIComponent).join(',')}?include=base_token,quote_token&include_volume_breakdown=true&include_composition=true`;
+      assertAnalystEndpoint(url, this.options.config.providers.coingecko.rest_base_url);
+      const result = await requestJson<Record<string, unknown>>(
+        url,
+        { headers: { 'x-cg-pro-api-key': key } },
+        httpOptions(this.options.config, 'coingecko', 'pools.multi.level1'),
+      );
+      const parsed = coingeckoPoolBatchRawSchema.parse(result.data);
+      const observedAt = Date.now();
+      insertProviderEvent(
+        this.options.database,
+        {
+          provider: 'coingecko',
+          capability: 'pools.multi.level1',
+          chain,
+          observedAt,
+          schemaVersion: 'coingecko.pools.multi.v1',
+          payload: JSON.stringify(parsed),
+          billingBucket: 'pool_screening',
+          requestMeta: {
+            endpoint_name: 'onchain.pools.multi',
+            method: 'GET',
+            status: result.diagnostic.status,
+            response_bytes: Buffer.byteLength(JSON.stringify(parsed)),
+          },
+        },
+        this.options.writeBudget,
+      );
+      for (const row of poolRows) {
+        const raw = poolRawForAddress(parsed, network, row.pool_address, row.token_address);
+        if (!raw) {
+          attempted += 1;
+          continue;
+        }
+        const parsedPool = parsePool(raw, chain, row.token_address);
+        if (parsedPool.status !== 'complete') {
+          attempted += 1;
+          continue;
+        }
+        const tradeUrl = `${this.options.config.providers.coingecko.rest_base_url}/onchain/networks/${network}/pools/${encodeURIComponent(row.pool_address)}/trades`;
+        assertAnalystEndpoint(tradeUrl, this.options.config.providers.coingecko.rest_base_url);
+        const tradeResult = await requestJson<Record<string, unknown>>(
+          tradeUrl,
+          { headers: { 'x-cg-pro-api-key': key } },
+          httpOptions(this.options.config, 'coingecko', 'trades.level1'),
+        );
+        const tradePayload = coingeckoTradesRawSchema.parse(tradeResult.data);
+        const tradeObservedAt = Date.now();
+        insertProviderEvent(
+          this.options.database,
+          {
+            provider: 'coingecko',
+            capability: 'trades.level1',
+            chain,
+            tokenAddress: row.token_address,
+            poolAddress: row.pool_address,
+            observedAt: tradeObservedAt,
+            schemaVersion: 'coingecko.trades.v1',
+            payload: JSON.stringify(tradePayload),
+            billingBucket: 'pool_screening',
+            requestMeta: {
+              endpoint_name: 'onchain.pools.trades',
+              method: 'GET',
+              status: tradeResult.diagnostic.status,
+              response_bytes: Buffer.byteLength(JSON.stringify(tradePayload)),
+            },
+          },
+          this.options.writeBudget,
+        );
+        attempted += 1;
+        const level1 = parseLevel1Snapshot(
+          level1RawForPool(
+            raw,
+            parsedPool.pool,
+            findPoolAttributes(parsed, network, row.pool_address),
+            observedAt,
+            latestTradeAt(tradePayload),
+          ),
+          parsedPool.pool,
+          observedAt,
+        );
+        if (level1.status !== 'complete') continue;
+        complete += 1;
+        this.level1Snapshots.set(parsedPool.pool.identityKey, level1.snapshot);
+        boundedWrite(this.options.database, this.options.writeBudget, (context) => {
+          const info = this.options.database
+            .prepare(
+              `UPDATE candidates SET funnel_status = 'level1_checked', updated_at = ?
+               WHERE chain = ? AND token_address = ? AND pool_address = ? AND safety_status = 'pass'`,
+            )
+            .run(observedAt, chain, row.token_address, row.pool_address);
+          context.addRows(info.changes);
+        });
+      }
+      await delay(60_000 / this.options.config.providers.coingecko.rest_requests_per_minute);
+    }
+    this.level1 =
+      complete > 0 && complete === attempted ? 'ok' : attempted > 0 ? 'failed' : 'unknown';
   }
 
   private async resolveCoinGeckoPools(key: string): Promise<void> {
@@ -605,4 +749,40 @@ function redact(value: string, secrets: readonly string[]): string {
 
 function readSafeInteger(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function dedupePools(
+  rows: Array<{ chain: 'sol' | 'bsc'; token_address: string; pool_address: string }>,
+): Array<{ chain: 'sol' | 'bsc'; token_address: string; pool_address: string }> {
+  const seen = new Set<string>();
+  return rows.filter((row) => {
+    const key = `${row.chain}:${row.chain === 'bsc' ? row.pool_address.toLowerCase() : row.pool_address}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function findPoolAttributes(
+  response: Record<string, unknown>,
+  network: 'solana' | 'bsc',
+  address: string,
+): Record<string, unknown> {
+  const item = (Array.isArray(response.data) ? response.data : [])
+    .map((value) => (value && typeof value === 'object' ? (value as Record<string, unknown>) : {}))
+    .find((value) => {
+      const attributes = value.attributes;
+      if (!attributes || typeof attributes !== 'object' || Array.isArray(attributes)) return false;
+      const candidate = (attributes as Record<string, unknown>).address;
+      return (
+        typeof candidate === 'string' &&
+        (network === 'bsc'
+          ? candidate.toLowerCase() === address.toLowerCase()
+          : candidate === address)
+      );
+    });
+  const attributes = item?.attributes;
+  return attributes && typeof attributes === 'object' && !Array.isArray(attributes)
+    ? (attributes as Record<string, unknown>)
+    : {};
 }

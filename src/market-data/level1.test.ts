@@ -54,6 +54,10 @@ test('Level 1 parser keeps buyers distinct from trade counts and enforces freshn
     assert.deepEqual(canEnterArmed(parsed.snapshot, 54_999, 45), { status: 'pass' });
   }
   assert.equal(parseLevel1Snapshot({ ...raw(), buyers: '8' }, pool, 10_000).status, 'invalid');
+  assert.equal(
+    parseLevel1Snapshot({ ...raw(), last_trade_at: 10_001 }, pool, 10_000).status,
+    'invalid',
+  );
 });
 
 test('Level 1 batches deduplicate and cap each chain at 50 pools', () => {

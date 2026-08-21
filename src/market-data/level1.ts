@@ -54,6 +54,8 @@ export function parseLevel1Snapshot(
     const poolAgeSeconds = requiredInteger(raw, 'pool_age_seconds', reasons);
     const lastTradeAt = requiredTimestamp(raw, 'last_trade_at', reasons);
     if (!Number.isSafeInteger(observedAt) || observedAt < 0) reasons.push('invalid:observed_at');
+    if (lastTradeAt !== undefined && lastTradeAt > observedAt)
+      reasons.push('invalid:future_last_trade_at');
     if (
       reasons.length > 0 ||
       poolStatus === undefined ||

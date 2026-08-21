@@ -1,7 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parsePool, selectPrimaryPool } from '../market-data/pools.js';
-import { poolRawsForToken, tokenAddressFromCoinGeckoItem } from './coingecko-adapter.js';
+import {
+  latestTradeAt,
+  level1RawForPool,
+  poolRawForAddress,
+  poolRawsForToken,
+  tokenAddressFromCoinGeckoItem,
+} from './coingecko-adapter.js';
 
 const token = 'Token111';
 const pool = 'Pool111';
@@ -62,4 +68,58 @@ test('ignores included pools that are not listed in the token top-pools relation
     token,
   );
   assert.equal(result.length, 1);
+});
+
+test('maps pool snapshots and trades to a fresh Level 1 raw record', () => {
+  const raw = poolRawForAddress(
+    {
+      data: [
+        {
+          type: 'pool',
+          attributes: {
+            address: pool,
+            reserve_in_usd: '1000.50',
+            pool_created_at: '2026-08-21T00:00:00Z',
+            transactions: { m5: { buys: 4, sells: 3, buyers: 5, sellers: 4 } },
+            volume_usd: { m5: '250.25' },
+            net_buy_volume_usd: { m5: '12.25' },
+            base_token_price_usd: '1.25',
+          },
+          relationships: {
+            base_token: { data: { id: `solana_${token}` } },
+            quote_token: { data: { id: 'solana_USDC' } },
+          },
+        },
+      ],
+    },
+    'solana',
+    pool,
+    token,
+  );
+  assert.ok(raw);
+  const parsedPool = parsePool(raw!, 'sol', token);
+  assert.equal(parsedPool.status, 'complete');
+  if (parsedPool.status !== 'complete') return;
+  const observedAt = Date.parse('2026-08-21T00:05:00Z');
+  const latest = latestTradeAt({
+    data: [
+      { attributes: { block_timestamp: '2026-08-21T00:04:59Z' } },
+      { attributes: { block_timestamp: '2026-08-21T00:05:01Z' } },
+    ],
+  });
+  const level1 = level1RawForPool(
+    raw!,
+    parsedPool.pool,
+    {
+      transactions: { m5: { buys: 4, sells: 3, buyers: 5, sellers: 4 } },
+      volume_usd: { m5: '250.25' },
+      net_buy_volume_usd: { m5: '12.25' },
+      base_token_price_usd: '1.25',
+    },
+    observedAt,
+    latest,
+  );
+  assert.equal(level1.last_trade_at, Date.parse('2026-08-21T00:05:01Z'));
+  assert.equal(level1.buyers, 5);
+  assert.equal(level1.net_buy_usd, '12.25');
 });

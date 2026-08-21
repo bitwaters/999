@@ -37,7 +37,9 @@ import {
 } from '../providers/coingecko-adapter.js';
 import { isLevel1Fresh, parseLevel1Snapshot, type Level1Snapshot } from '../market-data/level1.js';
 import { CoinGeckoG2Client, type G2ClientStatus } from '../providers/coingecko-g2.js';
-import { evaluateAttention, evaluateDispatchGuard, type SignalSnapshot } from '../pipeline/ace.js';
+import { evaluateDispatchGuard, type SignalSnapshot } from '../pipeline/ace.js';
+import { evaluateCandidateAttention } from '../pipeline/candidate-attention.js';
+export { evaluateCandidateAttention } from '../pipeline/candidate-attention.js';
 import { createLiveSignal } from './live-signal.js';
 import {
   evaluateExecution,
@@ -99,6 +101,19 @@ export function g2ProbeState(
 ): ProbeState {
   if (queueIncomplete) return 'failed';
   return clientState ?? 'ok';
+}
+
+export function level1ProbeState(attempted: number, complete: number): ProbeState {
+  if (
+    !Number.isSafeInteger(attempted) ||
+    attempted < 0 ||
+    !Number.isSafeInteger(complete) ||
+    complete < 0 ||
+    complete > attempted
+  )
+    throw new Error('Invalid Level 1 probe counts');
+  if (attempted === 0) return 'unknown';
+  return complete > 0 ? 'ok' : 'failed';
 }
 
 export function shouldRearmG2Candidate(status: string, funnelStatus: string): boolean {
@@ -994,8 +1009,13 @@ export class ProviderProbe {
       });
       await delay(60_000 / this.options.config.providers.coingecko.rest_requests_per_minute);
     }
-    this.level1 =
-      complete > 0 && complete === attempted ? 'ok' : attempted > 0 ? 'failed' : 'unknown';
+    this.level1 = level1ProbeState(attempted, complete);
+    this.options.logger(this.level1 === 'ok' ? 'info' : 'warn', 'level1_probe_summary', {
+      attempted,
+      complete,
+      incomplete: attempted - complete,
+      status: this.level1,
+    });
   }
 
   private async armEligibleCandidates(key: string): Promise<void> {
@@ -1924,48 +1944,6 @@ function redact(value: string, secrets: readonly string[]): string {
 
 function readSafeInteger(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
-}
-
-export function evaluateCandidateAttention(
-  evidence: readonly DiscoveryObservation[],
-  config: BotConfig['strategies']['emerging_breakout']['attention'],
-): ReturnType<typeof evaluateAttention> {
-  const decisions = attentionInputs(evidence).map((input) => evaluateAttention(input, config));
-  if (decisions.length === 0) return { status: 'incomplete', reasons: ['missing:attention'] };
-  if (decisions.some((decision) => decision.status === 'pass')) return { status: 'pass', reasons: [] };
-  const reasons = [...new Set(decisions.flatMap((decision) => decision.reasons))];
-  if (decisions.some((decision) => decision.status === 'incomplete'))
-    return { status: 'incomplete', reasons: reasons.length > 0 ? reasons : ['missing:attention'] };
-  return { status: 'rejected', reasons: reasons.length > 0 ? reasons : ['rejected:attention'] };
-}
-
-function attentionInputs(evidence: readonly DiscoveryObservation[]): Array<{
-  rankBefore?: number;
-  rankAfter?: number;
-  visitingBefore?: number;
-  visitingAfter?: number;
-}> {
-  const bySource = new Map<string, DiscoveryObservation[]>();
-  for (const item of evidence)
-    bySource.set(item.source, [...(bySource.get(item.source) ?? []), item]);
-  return [...bySource.values()]
-    .map((items) => items.sort((left, right) => left.observedAt - right.observedAt))
-    .filter((items) => items.length >= 2)
-    .map((items) => {
-      const previous = items.at(-2)!;
-      const latest = items.at(-1)!;
-      return items[0]!.source === 'hot_searches'
-        ? {
-            ...(previous.visitingCount === undefined
-              ? {}
-              : { visitingBefore: previous.visitingCount }),
-            ...(latest.visitingCount === undefined ? {} : { visitingAfter: latest.visitingCount }),
-          }
-        : {
-            ...(previous.rank === undefined ? {} : { rankBefore: previous.rank }),
-            ...(latest.rank === undefined ? {} : { rankAfter: latest.rank }),
-          };
-    });
 }
 
 function parseSafety(value: string): SafetyResult | undefined {

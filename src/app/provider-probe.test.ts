@@ -7,6 +7,7 @@ import {
   expireStaleCandidateRows,
   g2ProbeState,
   latestLevel1ObservedAt,
+  level1ProbeState,
   selectArmCandidateRows,
   selectLevel1CandidateRows,
   selectPoolResolutionRows,
@@ -25,6 +26,13 @@ test('G2 is healthy when no candidate currently requires an active socket', () =
   assert.equal(g2ProbeState('unknown', false), 'unknown');
   assert.equal(g2ProbeState('failed', false), 'failed');
   assert.equal(g2ProbeState(undefined, true), 'failed');
+});
+
+test('Level 1 provider health tolerates candidate-local gaps but fails when none parse', () => {
+  assert.equal(level1ProbeState(0, 0), 'unknown');
+  assert.equal(level1ProbeState(50, 43), 'ok');
+  assert.equal(level1ProbeState(50, 0), 'failed');
+  assert.throws(() => level1ProbeState(1, 2), /Invalid Level 1 probe counts/);
 });
 
 test('G2 re-arms persisted candidates after a process restart', () => {

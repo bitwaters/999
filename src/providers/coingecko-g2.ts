@@ -20,6 +20,7 @@ export type G2ClientOptions = {
   reconnectDelayMs: number;
   logger?: G2Logger;
   onMessage?: (message: RawG2Item, observedAt: number) => void;
+  onIntegrityLoss?: (event: string, observedAt: number) => void;
 };
 
 export type G2ClientStatus = 'ok' | 'failed' | 'unknown';
@@ -187,6 +188,7 @@ export class CoinGeckoG2Client {
 
   private fail(event: string): void {
     this.state = 'failed';
+    this.options.onIntegrityLoss?.(event, Date.now());
     this.options.logger?.('warn', event);
   }
 

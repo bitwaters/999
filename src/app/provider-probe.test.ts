@@ -14,7 +14,11 @@ import {
   level1FunnelAfterBatch,
   level1WorkDueAt,
   nextLevel1ProbeState,
+  outcomeEntryCoverageIsComplete,
   planExistingG2Capacity,
+  readOutcomeEntryCoverage,
+  readPersistedOutcomePool,
+  recordOutcomeEntryCoverage,
   readLevel1Backlog,
   isConfirmationWindowUsable,
   refreshConfirmationEvidence,
@@ -27,6 +31,7 @@ import {
   summarizeLevel1BatchResults,
 } from './provider-probe.js';
 import { openDatabase } from '../persistence/db.js';
+import { insertProviderEvent } from '../persistence/provider-events.js';
 import type { SafetyResult } from '../domain/safety.js';
 import type { Level1Snapshot } from '../market-data/level1.js';
 
@@ -34,6 +39,67 @@ test('security refresh address matching is chain-specific', () => {
   assert.equal(sameChainAddress('bsc', '0xABC', '0xabc'), true);
   assert.equal(sameChainAddress('sol', 'AbC', 'abc'), false);
   assert.equal(sameChainAddress('sol', 'AbC', 'AbC'), true);
+});
+
+test('Outcome restores its immutable pool identity after the candidate leaves runtime caches', () => {
+  const database = openDatabase(':memory:');
+  const poolAddress = '0x1234567890abcdef1234567890abcdef12345678';
+  const tokenAddress = '0xabcdef0123456789012345678901234567890123';
+  const quoteAddress = '0x0000000000000000000000000000000000000001';
+  insertProviderEvent(
+    database,
+    {
+      provider: 'coingecko',
+      capability: 'pools.multi.level1',
+      chain: 'bsc',
+      tokenAddress: tokenAddress.toUpperCase(),
+      poolAddress: poolAddress.toUpperCase(),
+      observedAt: 2_000,
+      schemaVersion: 'coingecko.pools.multi.v1',
+      payload: JSON.stringify({
+        data: [
+          {
+            id: `bsc_${poolAddress}`,
+            type: 'pool',
+            attributes: {
+              address: poolAddress,
+              reserve_in_usd: '10000',
+              volume_usd: { h24: '5000' },
+              pool_created_at: '1970-01-01T00:00:01.000Z',
+              transactions: { h24: { buys: 5, sells: 4 } },
+            },
+            relationships: {
+              base_token: { data: { id: `bsc_${tokenAddress}` } },
+              quote_token: { data: { id: `bsc_${quoteAddress}` } },
+            },
+          },
+        ],
+      }),
+    },
+    { maxRows: 10, maxMs: 1_000 },
+  );
+
+  const restored = readPersistedOutcomePool(database, 'bsc', tokenAddress, poolAddress);
+  assert.equal(restored?.identityKey, `bsc:${poolAddress}:${tokenAddress}`);
+  assert.equal(restored?.targetSide, 'base');
+  assert.equal(restored && readOutcomeEntryCoverage(database, 7, restored), undefined);
+  if (restored) {
+    recordOutcomeEntryCoverage(database, { maxRows: 10, maxMs: 1_000 }, 7, restored, true, 3_000);
+    assert.equal(readOutcomeEntryCoverage(database, 7, restored), true);
+    assert.equal(readOutcomeEntryCoverage(database, 8, restored), undefined);
+  }
+  assert.equal(readPersistedOutcomePool(database, 'sol', tokenAddress, poolAddress), undefined);
+  database.close();
+});
+
+test('Outcome entry coverage fails closed across disconnects, restarts, and queue pressure', () => {
+  assert.equal(outcomeEntryCoverageIsComplete(3, 3, true, true, false), true);
+  assert.equal(outcomeEntryCoverageIsComplete(3, 4, true, true, false), false);
+  assert.equal(outcomeEntryCoverageIsComplete(-1, 3, true, true, false), false);
+  assert.equal(outcomeEntryCoverageIsComplete(undefined, 3, true, true, false), false);
+  assert.equal(outcomeEntryCoverageIsComplete(3, 3, false, true, false), false);
+  assert.equal(outcomeEntryCoverageIsComplete(3, 3, true, false, false), false);
+  assert.equal(outcomeEntryCoverageIsComplete(3, 3, true, true, true), false);
 });
 
 test('confirmation refresh reuses only the just-closed G2 window', () => {

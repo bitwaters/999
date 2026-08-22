@@ -188,6 +188,23 @@ export function g2ProbeState(
   return clientState ?? 'ok';
 }
 
+export function outcomeEntryCoverageIsComplete(
+  startEpoch: number | undefined,
+  currentEpoch: number,
+  clientHealthy: boolean,
+  subscriptionActive: boolean,
+  queueHighWater: boolean,
+): boolean {
+  return (
+    startEpoch !== undefined &&
+    startEpoch >= 0 &&
+    startEpoch === currentEpoch &&
+    clientHealthy &&
+    subscriptionActive &&
+    !queueHighWater
+  );
+}
+
 export function level1ProbeState(scheduledBatches: number, failedBatches: number): ProbeState {
   if (
     !Number.isSafeInteger(scheduledBatches) ||
@@ -669,6 +686,8 @@ export class ProviderProbe {
   private g2DrainScheduled = false;
   private g2DrainInFlight: Promise<void> | undefined;
   private g2QueueIncomplete = false;
+  private g2IntegrityEpoch = 0;
+  private readonly outcomeG2StartEpoch = new Map<number, number>();
   private readonly signalCheckTimers = new Map<string, NodeJS.Timeout>();
   private readonly signalBlockLogKeys = new Set<string>();
   private readonly confirmationRefreshAttempted = new Set<string>();
@@ -711,6 +730,7 @@ export class ProviderProbe {
         },
         onHardLimit: () => {
           this.g2QueueIncomplete = true;
+          this.g2IntegrityEpoch += 1;
           this.options.logger('error', 'g2_queue_hard_limit', {
             size: this.g2Queue.size(),
           });
@@ -743,6 +763,7 @@ export class ProviderProbe {
     for (const timer of this.signalCheckTimers.values()) clearTimeout(timer);
     this.signalCheckTimers.clear();
     this.outcomePollAt.clear();
+    this.outcomeG2StartEpoch.clear();
     await this.inFlight;
     await this.coinGeckoScheduler.stop();
     await this.coinGeckoInFlight;
@@ -1711,31 +1732,21 @@ export class ProviderProbe {
       eligible.push({ row, pool, screening });
     }
     if (eligible.length === 0 && existingArmed.length === 0) return;
-    this.g2Client ??= new CoinGeckoG2Client({
-      websocketUrl: this.options.config.providers.coingecko.websocket_url,
-      apiKey: key,
-      maxSubscriptions: this.options.config.providers.coingecko.g2.max_subscriptions_per_socket,
-      maxResponseBytes: this.options.config.providers.coingecko.max_response_bytes,
-      connectTimeoutMs: this.options.config.providers.coingecko.request_timeout_ms,
-      reconnectDelayMs: 1_000,
-      logger: this.options.logger,
-      onMessage: (message, observedAt) => this.recordG2Message(message, observedAt),
-    });
-    await this.g2Client.start();
+    const g2Client = await this.ensureG2Client(key);
     const capacityPlan = planExistingG2Capacity(
       existingArmed,
       this.options.config.providers.coingecko.g2.max_subscriptions_per_socket,
     );
     if (capacityPlan.demoted.length > 0) this.demoteArmedForG2Capacity(capacityPlan.demoted);
     const desired = new Set(capacityPlan.retained.map(({ pool }) => pool.identityKey));
-    for (const identityKey of armedSubscriptionsToRelease(this.g2Client.active(), desired))
-      this.g2Client.unset(identityKey);
+    for (const identityKey of armedSubscriptionsToRelease(g2Client.active(), desired))
+      g2Client.unset(identityKey);
     this.finalistReservations.reconcileOccupied(desired);
     for (const { row, pool } of capacityPlan.retained) {
       const state = row.status === 'armed' ? 'armed' : 'confirmed-pending-anchor';
-      if (state === 'confirmed-pending-anchor' && !this.g2Client.active().has(pool.identityKey))
-        this.g2Client.request(pool, 'armed');
-      this.g2Client.request(pool, state);
+      if (state === 'confirmed-pending-anchor' && !g2Client.active().has(pool.identityKey))
+        g2Client.request(pool, 'armed');
+      g2Client.request(pool, state);
     }
     if (capacityPlan.overflowed) return;
 
@@ -1874,6 +1885,24 @@ export class ProviderProbe {
       );
     }
     await Promise.allSettled(initializationJobs);
+  }
+
+  private async ensureG2Client(key: string): Promise<CoinGeckoG2Client> {
+    this.g2Client ??= new CoinGeckoG2Client({
+      websocketUrl: this.options.config.providers.coingecko.websocket_url,
+      apiKey: key,
+      maxSubscriptions: this.options.config.providers.coingecko.g2.max_subscriptions_per_socket,
+      maxResponseBytes: this.options.config.providers.coingecko.max_response_bytes,
+      connectTimeoutMs: this.options.config.providers.coingecko.request_timeout_ms,
+      reconnectDelayMs: 1_000,
+      logger: this.options.logger,
+      onMessage: (message, observedAt) => this.recordG2Message(message, observedAt),
+      onIntegrityLoss: () => {
+        this.g2IntegrityEpoch += 1;
+      },
+    });
+    await this.g2Client.start();
+    return this.g2Client;
   }
 
   private async initializeFinalist(
@@ -2223,15 +2252,68 @@ export class ProviderProbe {
       this.markSignalDelivered(row.signal_id);
       const signal = parseSignalSnapshot(row.snapshot_json);
       const pool = row.pool_address
-        ? [...this.level1Pools.values()].find(
+        ? ([...this.level1Pools.values()].find(
             (candidate) =>
               candidate.chain === row.chain &&
               candidate.poolAddress === row.pool_address &&
               candidate.tokenAddress === row.token_address,
-          )
+          ) ??
+          readPersistedOutcomePool(
+            this.options.database,
+            row.chain,
+            row.token_address,
+            row.pool_address,
+          ))
         : undefined;
       if (!signal || !pool || row.target_side === null) continue;
+      this.level1Pools.set(pool.identityKey, pool);
       const now = Date.now();
+      const entryCoverageUntil =
+        row.sent_at + this.options.config.outcomes.entry_timeout_seconds * 1000;
+      let entryCoverageComplete = readOutcomeEntryCoverage(
+        this.options.database,
+        row.signal_id,
+        pool,
+      );
+      if (entryCoverageComplete === undefined && now < entryCoverageUntil) {
+        const startedWithContinuousCoverage =
+          this.g2Client?.status() === 'ok' &&
+          this.g2Client.active().get(pool.identityKey) === 'confirmed-pending-anchor';
+        if (!this.outcomeG2StartEpoch.has(row.signal_id))
+          this.outcomeG2StartEpoch.set(
+            row.signal_id,
+            startedWithContinuousCoverage ? this.g2IntegrityEpoch : -1,
+          );
+        try {
+          const client = await this.ensureG2Client(key);
+          if (!client.active().has(pool.identityKey)) client.request(pool, 'armed');
+          client.request(pool, 'confirmed-pending-anchor');
+        } catch (error) {
+          this.options.logger('warn', 'outcome_g2_recovery_failed', {
+            signal_id: row.signal_id,
+            error: this.safeError(error),
+          });
+        }
+      } else if (entryCoverageComplete === undefined) {
+        const startEpoch = this.outcomeG2StartEpoch.get(row.signal_id);
+        entryCoverageComplete = outcomeEntryCoverageIsComplete(
+          startEpoch,
+          this.g2IntegrityEpoch,
+          this.g2Client?.status() === 'ok',
+          this.g2Client?.active().get(pool.identityKey) === 'confirmed-pending-anchor',
+          this.g2Queue.atHighWatermark(),
+        );
+        recordOutcomeEntryCoverage(
+          this.options.database,
+          this.options.writeBudget,
+          row.signal_id,
+          pool,
+          entryCoverageComplete,
+          now,
+        );
+        this.outcomeG2StartEpoch.delete(row.signal_id);
+        this.unsetSignalG2(row.signal_id);
+      }
       const pollKey = pool.identityKey;
       const lastPollAt = this.outcomePollAt.get(pollKey);
       const ageSeconds = Math.max(0, Math.floor((now - row.sent_at) / 1000));
@@ -2256,6 +2338,7 @@ export class ProviderProbe {
           now,
           maxHorizon,
           finalCutoff,
+          entryCoverageComplete ?? false,
         ).catch((error: unknown) => {
           this.options.logger('warn', 'outcome_runtime_incomplete', {
             signal_id: row.signal_id,
@@ -2282,6 +2365,7 @@ export class ProviderProbe {
     now: number,
     maxHorizon: number,
     finalCutoff: number,
+    entryCoverageComplete: boolean,
   ): Promise<void> {
     const candles = await this.fetchOutcomeCandles(key, pool, row.sent_at, now, finalCutoff);
     if (now < finalCutoff) return;
@@ -2306,7 +2390,7 @@ export class ProviderProbe {
     const selectedEntry = entry.status === 'executable' ? entry.trade : undefined;
     const execution = evaluateExecution({
       entry,
-      g2CoverageComplete: !this.g2QueueIncomplete,
+      g2CoverageComplete: entryCoverageComplete,
       restCoverageComplete: hasCandleCoverage(
         candles,
         row.sent_at,
@@ -2534,8 +2618,11 @@ export class ProviderProbe {
       )
       .get(signalId) as
       { chain: 'sol' | 'bsc'; pool_address: string | null; token_address: string } | undefined;
-    if (signal?.pool_address)
-      this.g2Client?.unset(`${signal.chain}:${signal.pool_address}:${signal.token_address}`);
+    if (signal?.pool_address) {
+      const identityKey = `${signal.chain}:${signal.pool_address}:${signal.token_address}`;
+      this.g2Client?.unset(identityKey);
+      this.finalistReservations.releaseOccupied(identityKey);
+    }
   }
 
   private recordG2Message(message: Record<string, unknown>, observedAt: number): void {
@@ -3054,6 +3141,7 @@ export class ProviderProbe {
 
   private markG2Incomplete(reason: string): void {
     this.g2QueueIncomplete = true;
+    this.g2IntegrityEpoch += 1;
     this.g2Queue.markIncomplete(reason);
     this.options.logger('warn', 'g2_evidence_incomplete', { reason });
   }
@@ -3391,6 +3479,107 @@ function parseSignalSnapshot(value: string): SignalSnapshot | undefined {
   } catch {
     return undefined;
   }
+}
+
+export function readPersistedOutcomePool(
+  database: SqliteDatabase,
+  chain: 'sol' | 'bsc',
+  tokenAddress: string,
+  poolAddress: string,
+): CanonicalPool | undefined {
+  const addressClause =
+    chain === 'bsc'
+      ? 'lower(pool_address) = lower(?) AND lower(token_address) = lower(?)'
+      : 'pool_address = ? AND token_address = ?';
+  const events = database
+    .prepare(
+      `SELECT payload_encoding, payload
+       FROM provider_events
+       WHERE provider = 'coingecko' AND capability = 'pools.multi.level1'
+         AND chain = ? AND ${addressClause}
+       ORDER BY observed_at DESC LIMIT 10`,
+    )
+    .all(chain, poolAddress, tokenAddress) as Array<{
+    payload_encoding: 'identity' | 'gzip';
+    payload: Buffer;
+  }>;
+  const network = chain === 'sol' ? 'solana' : 'bsc';
+  for (const event of events) {
+    try {
+      const payload = coingeckoPoolBatchRawSchema.parse(
+        JSON.parse(decodeProviderPayload(event.payload, event.payload_encoding)),
+      );
+      const raw = poolRawForAddress(payload, network, poolAddress, tokenAddress);
+      if (!raw) continue;
+      const parsed = parsePool(raw, chain, tokenAddress);
+      if (
+        parsed.status === 'complete' &&
+        sameChainAddress(chain, parsed.pool.poolAddress, poolAddress) &&
+        sameChainAddress(chain, parsed.pool.tokenAddress, tokenAddress)
+      )
+        return parsed.pool;
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
+export function readOutcomeEntryCoverage(
+  database: SqliteDatabase,
+  signalId: number,
+  pool: CanonicalPool,
+): boolean | undefined {
+  const addressClause =
+    pool.chain === 'bsc' ? 'lower(pool_address) = lower(?)' : 'pool_address = ?';
+  const events = database
+    .prepare(
+      `SELECT payload_encoding, payload
+       FROM provider_events
+       WHERE provider = 'runtime' AND capability = 'outcome.entry.coverage'
+         AND chain = ? AND ${addressClause}
+       ORDER BY observed_at DESC LIMIT 20`,
+    )
+    .all(pool.chain, pool.poolAddress) as Array<{
+    payload_encoding: 'identity' | 'gzip';
+    payload: Buffer;
+  }>;
+  for (const event of events) {
+    try {
+      const parsed = JSON.parse(
+        decodeProviderPayload(event.payload, event.payload_encoding),
+      ) as Record<string, unknown>;
+      if (parsed.signalId === signalId && typeof parsed.complete === 'boolean')
+        return parsed.complete;
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
+export function recordOutcomeEntryCoverage(
+  database: SqliteDatabase,
+  budget: WriteBudget,
+  signalId: number,
+  pool: CanonicalPool,
+  complete: boolean,
+  observedAt: number,
+): void {
+  insertProviderEvent(
+    database,
+    {
+      provider: 'runtime',
+      capability: 'outcome.entry.coverage',
+      chain: pool.chain,
+      tokenAddress: pool.tokenAddress,
+      poolAddress: pool.poolAddress,
+      observedAt,
+      schemaVersion: 'runtime.outcome.entry.coverage.v1',
+      payload: JSON.stringify({ signalId, complete, observedAt }),
+    },
+    budget,
+  );
 }
 
 function sameCandleDbValues(

@@ -1,6 +1,6 @@
 # Meme 信号推送 Bot 开发文档
 
-> 版本：3.11.0
+> 版本：3.12.0
 > 状态：开发设计基线；供应商待验证项与参数经 Shadow 评审后方可生产
 > 网络：Solana、BSC
 > 数据源：GMGN Agent API、CoinGecko Analyst API
@@ -723,6 +723,10 @@ Shadow 是 production 前的实时验证阶段，它与后续 production 共用�
 - 回算必须保存数据截止时间、样本范围、配置版本和结果版本；
 - 生产就绪度由有效样本结构、完整性、置信区间、不同时间切片稳定性和预算模拟共同评审，不由单一自然日或单一样本数自动决定；
 - 进入 production 后不再并行启动实时 Shadow 路由；相同原始样本继续累计，新配置只通过不产生 outbox 的 replay 做离线 Shadow 比较。
+
+首轮产品评审使用一套集中样本门槛：同一 Shadow config version 下，每链至少 100 个首次合格锚点已送达且 60m 状态已固化的真实 Signal，其中至少 60 个为 `execution_status=executable` 且 60m `evaluation_status=complete`。每链按锚点送达时间以前 70% 作为研究段、后 30% 作为验证段，验证段至少包含 30 个锚点和其中 18 个 executable+complete 样本；全部 `not_executable`、`late_entry`、`incomplete` 仍保留在各自分母。未达到门槛时冻结收益参数，只修复数据或工程缺陷；达到门槛只触发人工 production 评审，不自动放行。评审必须报告可执行率与正收益率的 Wilson 95% 区间、前后切片稳定性、完整率、尾部亏损、延迟和预算，不能把某个固定倍数命中率作为放行条件。production 后按 production run mode 独立累计，并在每链 200、500 个锚点时使用同一口径复评，不新增常驻统计服务。
+
+该门槛用于约束首轮决策，不宣称 100 个样本足以证明长期收益。Wilson 区间采用 [NIST 比例置信区间方法](https://itl.nist.gov/div898/handbook/prc/section2/prc241.htm)；冻结小样本反复选参是为了降低投资回测中的选择过拟合风险，参考 [The Probability of Backtest Overfitting](https://escholarship.org/uc/item/4w1110bb)。
 
 Shadow 报告只包含来源漏斗、安全节省的 credits、两链字段完整率、池解析和索引延迟、核心 ACE 指标、Emerging 可执行率、forward return/MFE/MAE、delivery drift、延迟和 credits。
 

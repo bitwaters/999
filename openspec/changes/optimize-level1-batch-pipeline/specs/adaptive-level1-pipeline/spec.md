@@ -184,6 +184,20 @@
 - **WHEN** SOL 或 BSC 的有效批量候选、最终候选或真实 Signal/Outcome 样本不足以评估决策一致性、延迟和 credits
 - **THEN** 系统继续保持 Shadow，不以自然日、零错误或代码测试通过替代样本验收
 
+### Requirement: 首轮产品评审必须使用固定的分链样本结构
+
+系统 SHALL 仅在同一 Shadow config version 下每链至少 100 个首次合格锚点已送达且 60m 状态已固化，并且其中至少 60 个为 executable 且 60m complete 时进入首轮产品评审。每链 SHALL 按锚点送达时间以前 70% 为研究段、后 30% 为验证段；验证段 MUST 至少包含 30 个锚点和 18 个 executable+complete 样本。未达到门槛时 MUST 冻结收益参数，只允许修复数据或工程缺陷。达到门槛只触发人工评审，不得自动切 production；全部 not_executable、late_entry 与 incomplete MUST 保留在对应分母。
+
+#### Scenario: 小样本尚不足以调参
+
+- **WHEN** 任一链不足 100 个已固化锚点、60 个 executable+complete，或验证段不足 30/18 个对应样本
+- **THEN** 系统保持 Shadow 和当前收益参数，只继续积累样本或修复可证明的数据/工程缺陷
+
+#### Scenario: 达到首轮产品评审门槛
+
+- **WHEN** 两链均达到完整分层样本门槛
+- **THEN** 人工评审可执行率与正收益率的 Wilson 95% 区间、研究/验证切片稳定性、完整率、尾部亏损、延迟和 credits 预算；不得以固定倍数命中率或单一均值自动放行
+
 ### Requirement: 优化不得增加运行拓扑和生产路由
 
 系统 SHALL 保持现有单进程、SQLite、单一 main 分支和单套 Shadow/production 业务路径，不得为本优化新增微服务、消息中间件、业务表或长期 legacy/adaptive 双路由。

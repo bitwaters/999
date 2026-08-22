@@ -29,4 +29,4 @@
 - 继续使用 CoinGecko Analyst `/pools/multi`、`/trades`、G2 和 `/key`，不增加供应商或运行时依赖。
 - 调度与策略参数仍集中在 `config/bot.yaml`，API 硬限制与项目调度限制分别校验。
 - 原始 provider event、候选、Signal、Outcome 和 replay 表结构保持不变；必要的证据阶段通过现有字段/事件能力表达。
-- 生产行为保持 Shadow，直到按链样本量验收通过；正式 Emerging Breakout 的 30 秒 G2 观察和完整确认表达式不放宽。
+- 生产行为保持 Shadow，直到工程门槛通过，且同一 Shadow config version 下每链至少 100 个首次合格锚点完成 60m 固化、其中至少 60 个 executable+complete，并通过前 70%/后 30% 时间切片人工评审；正式 Emerging Breakout 的 30 秒 G2 观察和完整确认表达式不放宽。

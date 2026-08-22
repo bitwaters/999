@@ -74,7 +74,7 @@ reservation 不预先创建 G2 socket，也不新增持久化表。关键状态�
 
 先在累计 raw 上运行旧逻辑基线与新批量筛选模拟，输出两链候选保留率、旧路径可通过但新路径丢失的差异、预计 trades 调用数、credits 和延迟分布。实现不保留运行时 feature flag 双路由；通过本地测试后直接按现有 main/deploy.sh 部署到 Shadow/admin anchor，失败使用 Git 回滚。
 
-工程验收按 chain + git commit + config version cohort 累计，每链同一 cohort 至少 500 个有效 batch candidates 与 50 个 finalists 为首个评审批次，不按自然日清零或停止历史累计。以 safety-pass 后首次 due 到批量完成、reservation 到 Armed 后 G2 发起两段计时；无 rate/credit defer 的成功样本两段 P95 均须不超过 10 秒，同语料 REST calls 至少下降 80%，且不得出现本地并发/限流错误造成的 429。修复可进入新 cohort 重新评审，旧异常仍保留在累计报告。所有 defer 单列进入端到端和 backlog 报告，不能用过滤掩盖。若真实 Signal/Outcome 尚无足够样本，只能确认工程指标，不能宣称 production 可用。
+工程验收按 chain + git commit + config version cohort 累计，每链同一 cohort 至少 500 个有效 batch candidates 与 50 个 finalists 为首个评审批次，不按自然日清零或停止历史累计。以 safety-pass 后首次 due 到批量完成、reservation 到 Armed 后 G2 发起两段计时；无 rate/credit defer 的成功样本两段 P95 均须不超过 10 秒，同语料 REST calls 至少下降 80%，且不得出现本地并发/限流错误造成的 429。修复可进入新 cohort 重新评审，旧异常仍保留在累计报告。所有 defer 单列进入端到端和 backlog 报告，不能用过滤掩盖。工程通过后仍须保持 Shadow，直至同一 config version 下每链至少 100 个首次合格锚点已送达且 60m 状态已固化，其中至少 60 个 executable+complete；每链按时间前 70%/后 30% 分段，验证段至少 30 个锚点和 18 个 executable+complete。未达标冻结收益参数；达标只进入包含 Wilson 95% 区间、切片稳定性、完整率、尾部亏损与预算的人工 production 评审，不自动放行。
 
 本变更以 `build-meme-signal-bot` 为基线依赖。实施时遵循其已批准的硬约束；归档时必须先将基线变更归档为 canonical specs，再复核重叠条款并把本变更转换为相应 capability 的 MODIFIED delta，避免两个活动变更各自成为事实源。
 

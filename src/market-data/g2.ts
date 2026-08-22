@@ -13,6 +13,7 @@ export type NormalizedTrade = {
   targetSide: 'buy' | 'sell';
   tokenAmount: string;
   quoteAmount: string;
+  volumeUsd: string;
   priceUsd: string;
   eventAt: number;
   observedAt: number;
@@ -46,10 +47,13 @@ export function normalizeG2Item(
     const eventAt = parseTimestampMs(raw.t);
     const tokenAmount = parseG2Decimal(raw.to);
     const quoteAmount = parseG2Decimal(raw.toq);
-    if (tokenAmount.isZero()) throw new Error('invalid:zero_token_amount');
+    const volumeUsd = parseG2Decimal(raw.vo);
+    const targetTokenAmount = pool.targetSide === 'base' ? tokenAmount : quoteAmount;
+    if (targetTokenAmount.isZero()) throw new Error('invalid:zero_target_token_amount');
+    if (volumeUsd.isZero()) throw new Error('invalid:zero_volume_usd');
     const identity = optionalIdentity(raw);
     const item = parseInteger(raw.item_index ?? itemIndex, { min: 0 });
-    const txHash = optionalString(raw.tx_hash);
+    const txHash = optionalString(raw.tx ?? raw.tx_hash);
     const logIndex = optionalInteger(raw.log_index);
     const legIndex = optionalInteger(raw.leg_index);
     const fingerprint = [
@@ -59,6 +63,7 @@ export function normalizeG2Item(
       eventAt,
       tokenAmount.toString(),
       quoteAmount.toString(),
+      volumeUsd.toString(),
       item,
     ].join('|');
     return {
@@ -71,7 +76,8 @@ export function normalizeG2Item(
         targetSide: pool.targetSide === 'base' ? rawSide : invertSide(rawSide),
         tokenAmount: tokenAmount.toString(),
         quoteAmount: quoteAmount.toString(),
-        priceUsd: quoteAmount.div(tokenAmount).toString(),
+        volumeUsd: volumeUsd.toString(),
+        priceUsd: volumeUsd.div(targetTokenAmount).toString(),
         eventAt,
         observedAt: parseTimestampMs(observedAt),
         ...(identity ? { providerTradeId: identity } : {}),
@@ -172,7 +178,7 @@ export function aggregateG2Window(
   for (const trade of inWindow) {
     let amount: Decimal;
     try {
-      amount = parseDecimalString(trade.quoteAmount, { nonNegative: true });
+      amount = parseDecimalString(trade.volumeUsd, { nonNegative: true });
     } catch {
       invalidNumeric = true;
       continue;

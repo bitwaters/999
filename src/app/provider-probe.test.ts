@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -18,10 +19,12 @@ import {
   unchangedLevel1WaitDedupeKey,
   level1WorkDueAt,
   nextLevel1ProbeState,
+  outcomeEvaluationPollRequired,
   outcomeEntryCoverageIsComplete,
   planExistingG2Capacity,
   readOutcomeEntryCoverage,
   readPersistedOutcomePool,
+  readRuleConfigVersion,
   recordOutcomeEntryCoverage,
   readLevel1Backlog,
   retainG2SubscriptionDuringCreditPressure,
@@ -39,11 +42,33 @@ import { openDatabase } from '../persistence/db.js';
 import { insertProviderEvent } from '../persistence/provider-events.js';
 import type { SafetyResult } from '../domain/safety.js';
 import type { Level1Snapshot } from '../market-data/level1.js';
+import { normalizeConfig, parseConfigText } from '../config/load.js';
+
+const botConfig = parseConfigText(
+  readFileSync(new URL('../../config/bot.yaml', import.meta.url), 'utf8'),
+).config;
 
 test('security refresh address matching is chain-specific', () => {
   assert.equal(sameChainAddress('bsc', '0xABC', '0xabc'), true);
   assert.equal(sameChainAddress('sol', 'AbC', 'abc'), false);
   assert.equal(sameChainAddress('sol', 'AbC', 'AbC'), true);
+});
+
+test('Outcome reads immutable settings from the Signal config version snapshot', () => {
+  const database = openDatabase(':memory:');
+  const saved = structuredClone(botConfig);
+  saved.outcomes.outcome_max_lateness_seconds = 30;
+  const result = database
+    .prepare(
+      `INSERT INTO rule_config_versions
+       (config_hash, git_commit, run_mode, yaml_snapshot, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+    .run('saved-hash', 'saved-commit', 'shadow', normalizeConfig(saved), 1_000);
+  const restored = readRuleConfigVersion(database, Number(result.lastInsertRowid));
+  assert.equal(restored?.outcomes.outcome_max_lateness_seconds, 30);
+  assert.equal(restored?.delivery.outcome_anchor_destination, 'admin_private');
+  database.close();
 });
 
 test('Outcome restores its immutable pool identity after the candidate leaves runtime caches', () => {
@@ -94,6 +119,21 @@ test('Outcome restores its immutable pool identity after the candidate leaves ru
   assert.equal(restored?.targetSide, 'base');
   assert.equal(restored && readOutcomeEntryCoverage(database, 7, restored), undefined);
   if (restored) {
+    insertProviderEvent(
+      database,
+      {
+        provider: 'runtime',
+        capability: 'outcome.entry.coverage',
+        chain: restored.chain,
+        tokenAddress: restored.tokenAddress,
+        poolAddress: restored.poolAddress,
+        observedAt: 2_900,
+        schemaVersion: 'runtime.outcome.entry.coverage.v1',
+        payload: JSON.stringify({ signalId: 7, complete: true, observedAt: 2_900 }),
+      },
+      { maxRows: 10, maxMs: 1_000 },
+    );
+    assert.equal(readOutcomeEntryCoverage(database, 7, restored), undefined);
     recordOutcomeEntryCoverage(database, { maxRows: 10, maxMs: 1_000 }, 7, restored, true, 3_000);
     assert.equal(readOutcomeEntryCoverage(database, 7, restored), true);
     assert.equal(readOutcomeEntryCoverage(database, 8, restored), undefined);
@@ -110,6 +150,34 @@ test('Outcome entry coverage fails closed across disconnects, restarts, and queu
   assert.equal(outcomeEntryCoverageIsComplete(3, 3, false, true, false), false);
   assert.equal(outcomeEntryCoverageIsComplete(3, 3, true, false, false), false);
   assert.equal(outcomeEntryCoverageIsComplete(3, 3, true, true, true), false);
+});
+
+test('Outcome forces a poll after the fixed horizon candle closes and before cutoff', () => {
+  const input = {
+    anchorDeliveredAt: 1_385,
+    horizonsSeconds: [60],
+    maxLatenessSeconds: 60,
+    candleIntervalSeconds: 30,
+  };
+  assert.equal(outcomeEvaluationPollRequired({ ...input, now: 89_999, candles: [] }), false);
+  assert.equal(outcomeEvaluationPollRequired({ ...input, now: 90_000, candles: [] }), true);
+  assert.equal(
+    outcomeEvaluationPollRequired({
+      ...input,
+      now: 100_000,
+      candles: [{ openTime: 60_000, observedAt: 99_000, isClosed: true }],
+    }),
+    false,
+  );
+  assert.equal(
+    outcomeEvaluationPollRequired({
+      ...input,
+      now: 100_000,
+      candles: [{ openTime: 60_000, observedAt: 122_000, isClosed: true }],
+    }),
+    true,
+  );
+  assert.equal(outcomeEvaluationPollRequired({ ...input, now: 121_386, candles: [] }), false);
 });
 
 test('confirmation refresh reuses only the just-closed G2 window', () => {

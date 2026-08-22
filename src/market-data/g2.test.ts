@@ -34,6 +34,7 @@ const raw = (side: 'buy' | 'sell', itemIndex = 0) => ({
   t: 1_000,
   to: '10',
   toq: '100',
+  vo: '100',
   trade_id: `trade-${itemIndex}`,
   item_index: itemIndex,
 });
@@ -44,6 +45,8 @@ test('G2 normalizer converts quote-side direction and preserves item legs', () =
   assert.equal(parsed.status, 'complete');
   if (parsed.status === 'complete') {
     assert.equal(parsed.trade.targetSide, 'sell');
+    assert.equal(parsed.trade.volumeUsd, '100');
+    assert.equal(parsed.trade.priceUsd, '1');
     assert.equal(parsed.trade.observedAt, 1_100);
     assert.equal(parsed.trade.itemIndex, 0);
   }
@@ -51,6 +54,36 @@ test('G2 normalizer converts quote-side direction and preserves item legs', () =
     normalizeG2Item({ ...raw('buy'), to: 'not-a-number' }, pool, 1_100).status,
     'invalid',
   );
+});
+
+test('G2 normalizer uses USD volume and the configured target token side', () => {
+  const quotePool = { ...pool, targetSide: 'quote' as const };
+  const parsed = normalizeG2Item(
+    {
+      c: 'G2',
+      n: 'solana',
+      pa: 'pool',
+      ty: 'b',
+      t: 1_000,
+      to: 0.003248,
+      toq: 17_315.6082440277,
+      vo: 14.9716916680872,
+      pu: 4_598.25372333289,
+      tx: '0xtrade',
+    },
+    quotePool,
+    1_100,
+  );
+  assert.equal(parsed.status, 'complete');
+  if (parsed.status !== 'complete') return;
+  assert.equal(parsed.trade.targetSide, 'sell');
+  assert.equal(parsed.trade.volumeUsd, '14.9716916680872');
+  assert.equal(parsed.trade.priceUsd, '0.00086463561990385543128');
+  assert.equal(parsed.trade.txHash, '0xtrade');
+  const window = aggregateG2Window([parsed.trade], 0, 2_000, 2_000);
+  assert.equal(window.buyVolumeUsd, '0');
+  assert.equal(window.sellVolumeUsd, '14.9716916680872');
+  assert.equal(normalizeG2Item({ ...raw('buy'), vo: null }, pool, 1_100).status, 'invalid');
 });
 
 test('G2 normalizer accepts the live compact side and numeric amount encoding', () => {
@@ -71,6 +104,7 @@ test('G2 normalizer accepts the live compact side and numeric amount encoding', 
     assert.equal(sell.trade.rawSide, 'sell');
     assert.equal(buy.trade.tokenAmount, '1.25');
     assert.equal(buy.trade.quoteAmount, '100');
+    assert.equal(buy.trade.volumeUsd, '100');
   }
 });
 
@@ -81,7 +115,7 @@ test('trade deduplication distinguishes exact replay from ambiguous collision', 
   const deduper = new TradeDeduper();
   assert.equal(deduper.ingest('message-1', [first.trade]).trades[0]?.dedupStatus, 'unique');
   assert.equal(deduper.ingest('message-1', [first.trade]).duplicateMessage, true);
-  const conflicting = { ...first.trade, quoteAmount: '101', fingerprint: 'different' };
+  const conflicting = { ...first.trade, volumeUsd: '101', fingerprint: 'different' };
   const result = deduper.ingest('message-2', [conflicting]);
   assert.equal(result.trades[0]?.ambiguityStatus, 'ambiguous');
   assert.match(hashG2Message({ c: 'G2' }), /^[a-f0-9]{64}$/u);
@@ -105,7 +139,7 @@ test('G2 window fail-closes malformed persisted decimals without crashing the ru
   assert.equal(parsed.status, 'complete');
   if (parsed.status !== 'complete') return;
   const window = aggregateG2Window(
-    [{ ...parsed.trade, quoteAmount: 'not-a-decimal' }],
+    [{ ...parsed.trade, volumeUsd: 'not-a-decimal' }],
     0,
     2_000,
     2_000,

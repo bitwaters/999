@@ -3,7 +3,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gunzipSync } from 'node:zlib';
 import { Decimal } from 'decimal.js';
-import type { BotConfig } from '../config/schema.js';
+import YAML from 'yaml';
+import { configSchema, type BotConfig } from '../config/schema.js';
 import { insertProviderEvent } from '../persistence/provider-events.js';
 import type { SqliteDatabase } from '../persistence/db.js';
 import { boundedWrite, type WriteBudget } from '../persistence/write-budget.js';
@@ -786,6 +787,7 @@ export class ProviderProbe {
   private readonly schedulerDecisionKeys = new Set<string>();
   private readonly confirmationRefreshes = new Set<Promise<void>>();
   private readonly outcomePollAt = new Map<string, number>();
+  private readonly configVersionCache = new Map<number, BotConfig>();
   private gmgnRequestTail: Promise<void> = Promise.resolve();
   private lastGmgnRequestAt = 0;
   private telegram: ProbeState = 'unknown';
@@ -2387,22 +2389,31 @@ export class ProviderProbe {
     return undefined;
   }
 
+  private readConfigVersion(configVersionId: number): BotConfig | undefined {
+    if (configVersionId === this.options.configVersionId) return this.options.config;
+    const cached = this.configVersionCache.get(configVersionId);
+    if (cached) return cached;
+    const config = readRuleConfigVersion(this.options.database, configVersionId);
+    if (config) this.configVersionCache.set(configVersionId, config);
+    return config;
+  }
+
   private async processOutcomes(key: string): Promise<void> {
-    const anchorDestination = this.options.config.delivery.outcome_anchor_destination;
     const rows = this.options.database
       .prepare(
         `SELECT s.id AS signal_id, s.config_version_id, s.snapshot_json, s.pre_send_drift,
-                c.chain, c.token_address, c.pool_address, c.target_side,
-                o.status AS anchor_status, o.sent_at, o.delivery_uncertain
+                c.chain, c.token_address, c.pool_address, c.target_side
          FROM signals s
          JOIN candidates c ON c.id = s.candidate_id
-         JOIN delivery_outbox o ON o.signal_id = s.id
-          AND o.destination = ? AND o.message_type = 'ENTRY_SIGNAL'
          LEFT JOIN outcomes x ON x.signal_id = s.id
-         WHERE x.id IS NULL AND o.status IN ('sent', 'expired')
-         ORDER BY o.sent_at ASC, s.id ASC LIMIT 20`,
+         WHERE x.id IS NULL AND s.status NOT IN ('expired', 'completed') AND EXISTS (
+           SELECT 1 FROM delivery_outbox o
+           WHERE o.signal_id = s.id AND o.message_type = 'ENTRY_SIGNAL'
+             AND o.status IN ('sent', 'expired')
+         )
+         ORDER BY s.id ASC`,
       )
-      .all(anchorDestination) as Array<{
+      .all() as Array<{
       signal_id: number;
       config_version_id: number;
       snapshot_json: string;
@@ -2411,17 +2422,37 @@ export class ProviderProbe {
       token_address: string;
       pool_address: string | null;
       target_side: 'base' | 'quote' | null;
-      anchor_status: 'sent' | 'expired';
-      sent_at: number | null;
-      delivery_uncertain: number;
     }>;
     const jobs: Array<Promise<void>> = [];
     for (const row of rows) {
-      if (row.delivery_uncertain === 1) {
+      const signalConfig = this.readConfigVersion(row.config_version_id);
+      if (!signalConfig) {
+        this.options.logger('warn', 'outcome_config_unavailable', {
+          signal_id: row.signal_id,
+          config_version_id: row.config_version_id,
+        });
+        continue;
+      }
+      const anchorDestination = signalConfig.delivery.outcome_anchor_destination;
+      const anchor = this.options.database
+        .prepare(
+          `SELECT status, sent_at, delivery_uncertain FROM delivery_outbox
+           WHERE signal_id = ? AND destination = ? AND message_type = 'ENTRY_SIGNAL'
+             AND status IN ('sent', 'expired') LIMIT 1`,
+        )
+        .get(row.signal_id, anchorDestination) as
+        | {
+            status: 'sent' | 'expired';
+            sent_at: number | null;
+            delivery_uncertain: number;
+          }
+        | undefined;
+      if (!anchor) continue;
+      if (anchor.delivery_uncertain === 1) {
         this.expireSignal(row.signal_id, 'anchor:delivery_uncertain');
         continue;
       }
-      if (row.anchor_status === 'expired' || row.sent_at === null) {
+      if (anchor.status === 'expired' || anchor.sent_at === null) {
         this.expireSignal(row.signal_id, 'anchor:expired');
         continue;
       }
@@ -2448,7 +2479,7 @@ export class ProviderProbe {
       this.level1Pools.set(pool.identityKey, pool);
       const now = Date.now();
       const entryCoverageUntil =
-        row.sent_at + this.options.config.outcomes.entry_timeout_seconds * 1000;
+        anchor.sent_at + signalConfig.outcomes.entry_timeout_seconds * 1000;
       let entryCoverageComplete = readOutcomeEntryCoverage(
         this.options.database,
         row.signal_id,
@@ -2495,25 +2526,44 @@ export class ProviderProbe {
       }
       const pollKey = pool.identityKey;
       const lastPollAt = this.outcomePollAt.get(pollKey);
-      const ageSeconds = Math.max(0, Math.floor((now - row.sent_at) / 1000));
+      const ageSeconds = Math.max(0, Math.floor((now - anchor.sent_at) / 1000));
       const pollMs = outcomePollIntervalMs(
         ageSeconds,
-        this.options.config.outcomes.rest_poll_segments_seconds,
+        signalConfig.outcomes.rest_poll_segments_seconds,
         this.options.config.providers.coingecko.rest_requests_per_minute,
       );
-      if (lastPollAt !== undefined && now - lastPollAt < pollMs) continue;
-      this.outcomePollAt.set(pollKey, now);
-      const maxHorizon = Math.max(...this.options.config.outcomes.horizons_seconds);
+      const maxHorizon = Math.max(...signalConfig.outcomes.horizons_seconds);
       const finalCutoff =
-        row.sent_at +
-        (maxHorizon + this.options.config.outcomes.outcome_max_lateness_seconds) * 1000;
+        anchor.sent_at + (maxHorizon + signalConfig.outcomes.outcome_max_lateness_seconds) * 1000;
+      const regularPollDue = lastPollAt === undefined || now - lastPollAt >= pollMs;
+      const evaluationPollDue =
+        !regularPollDue &&
+        (lastPollAt === undefined ||
+          now - lastPollAt >= signalConfig.outcomes.candle_interval_seconds * 1000) &&
+        outcomeEvaluationPollRequired({
+          anchorDeliveredAt: anchor.sent_at,
+          now,
+          horizonsSeconds: signalConfig.outcomes.horizons_seconds,
+          maxLatenessSeconds: signalConfig.outcomes.outcome_max_lateness_seconds,
+          candleIntervalSeconds: signalConfig.outcomes.candle_interval_seconds,
+          candles: readCandles(
+            this.options.database,
+            pool,
+            anchor.sent_at - signalConfig.outcomes.candle_interval_seconds * 1000,
+            now + signalConfig.outcomes.candle_interval_seconds * 1000,
+          ),
+        });
+      if (!regularPollDue && !evaluationPollDue && now < finalCutoff) continue;
+      if (jobs.length >= 20) break;
+      this.outcomePollAt.set(pollKey, now);
       jobs.push(
         this.processOutcomeRow(
           key,
-          { ...row, sent_at: row.sent_at },
+          { ...row, sent_at: anchor.sent_at },
           signal,
           pool,
           anchorDestination,
+          signalConfig.outcomes,
           now,
           maxHorizon,
           finalCutoff,
@@ -2541,17 +2591,25 @@ export class ProviderProbe {
     signal: SignalSnapshot,
     pool: CanonicalPool,
     anchorDestination: 'admin_private' | 'channel' | 'group',
+    outcomeConfig: BotConfig['outcomes'],
     now: number,
     maxHorizon: number,
     finalCutoff: number,
     entryCoverageComplete: boolean,
   ): Promise<void> {
-    const candles = await this.fetchOutcomeCandles(key, pool, row.sent_at, now, finalCutoff);
+    const candles = await this.fetchOutcomeCandles(
+      key,
+      pool,
+      row.sent_at,
+      now,
+      finalCutoff,
+      outcomeConfig,
+    );
     if (now < finalCutoff) return;
     const trades = readNormalizedTrades(
       this.options.database,
       pool,
-      row.sent_at - this.options.config.outcomes.entry_max_event_delay_seconds * 1000,
+      row.sent_at - outcomeConfig.entry_max_event_delay_seconds * 1000,
       finalCutoff,
     );
     const entry = selectEntry({
@@ -2561,10 +2619,10 @@ export class ProviderProbe {
       tokenAddress: pool.tokenAddress,
       anchorDeliveredAt: row.sent_at,
       now,
-      entryTimeoutSeconds: this.options.config.outcomes.entry_timeout_seconds,
-      maxTransportDelaySeconds: this.options.config.outcomes.entry_max_event_delay_seconds,
-      maxFutureSkewSeconds: this.options.config.outcomes.max_future_event_skew_seconds,
-      anchorToleranceSeconds: this.options.config.outcomes.entry_max_event_delay_seconds,
+      entryTimeoutSeconds: outcomeConfig.entry_timeout_seconds,
+      maxTransportDelaySeconds: outcomeConfig.entry_max_event_delay_seconds,
+      maxFutureSkewSeconds: outcomeConfig.max_future_event_skew_seconds,
+      anchorToleranceSeconds: outcomeConfig.entry_max_event_delay_seconds,
     });
     const selectedEntry = entry.status === 'executable' ? entry.trade : undefined;
     const execution = evaluateExecution({
@@ -2579,11 +2637,11 @@ export class ProviderProbe {
         selectedEntry !== undefined && !candleContainsTrade(candles, selectedEntry, row.sent_at),
     });
     const entryPartial = selectedEntry ? partialFromTrades(selectedEntry, trades) : undefined;
-    const horizonResults = this.options.config.outcomes.horizons_seconds.map((horizonSeconds) =>
+    const horizonResults = outcomeConfig.horizons_seconds.map((horizonSeconds) =>
       evaluateHorizon({
         anchorDeliveredAt: row.sent_at,
         horizonSeconds,
-        outcomeMaxLatenessSeconds: this.options.config.outcomes.outcome_max_lateness_seconds,
+        outcomeMaxLatenessSeconds: outcomeConfig.outcome_max_lateness_seconds,
         ...(selectedEntry
           ? { entry: { observedAt: selectedEntry.observedAt, priceUsd: selectedEntry.priceUsd } }
           : {}),
@@ -2624,14 +2682,15 @@ export class ProviderProbe {
     anchorDeliveredAt: number,
     now: number,
     finalCutoff: number,
+    outcomeConfig: BotConfig['outcomes'],
   ): Promise<Candle[]> {
     const network = pool.chain === 'sol' ? 'solana' : 'bsc';
     const limit = Math.min(
       500,
       Math.ceil(
-        (Math.max(...this.options.config.outcomes.horizons_seconds) +
-          this.options.config.outcomes.outcome_max_lateness_seconds +
-          this.options.config.outcomes.entry_timeout_seconds) /
+        (Math.max(...outcomeConfig.horizons_seconds) +
+          outcomeConfig.outcome_max_lateness_seconds +
+          outcomeConfig.entry_timeout_seconds) /
           30,
       ) + 4,
     );
@@ -2888,7 +2947,7 @@ export class ProviderProbe {
               trade.targetSide,
               trade.tokenAmount,
               trade.quoteAmount,
-              trade.quoteAmount,
+              trade.volumeUsd,
               trade.priceUsd,
               trade.eventAt,
               trade.observedAt,
@@ -2900,7 +2959,7 @@ export class ProviderProbe {
               trade.identityKey ?? null,
               trade.dedupStatus,
               trade.ambiguityStatus,
-              'coingecko.g2.v1',
+              'coingecko.g2.v2',
             );
           context.addRows(info.changes);
         });
@@ -3746,13 +3805,32 @@ export function readOutcomeEntryCoverage(
       const parsed = JSON.parse(
         decodeProviderPayload(event.payload, event.payload_encoding),
       ) as Record<string, unknown>;
-      if (parsed.signalId === signalId && typeof parsed.complete === 'boolean')
+      if (
+        parsed.signalId === signalId &&
+        parsed.g2ParserVersion === 'coingecko.g2.v2' &&
+        typeof parsed.complete === 'boolean'
+      )
         return parsed.complete;
     } catch {
       continue;
     }
   }
   return undefined;
+}
+
+export function readRuleConfigVersion(
+  database: SqliteDatabase,
+  configVersionId: number,
+): BotConfig | undefined {
+  const row = database
+    .prepare('SELECT yaml_snapshot FROM rule_config_versions WHERE id = ?')
+    .get(configVersionId) as { yaml_snapshot: string } | undefined;
+  if (!row) return undefined;
+  try {
+    return configSchema.parse(YAML.parse(row.yaml_snapshot));
+  } catch {
+    return undefined;
+  }
 }
 
 export function recordOutcomeEntryCoverage(
@@ -3772,8 +3850,13 @@ export function recordOutcomeEntryCoverage(
       tokenAddress: pool.tokenAddress,
       poolAddress: pool.poolAddress,
       observedAt,
-      schemaVersion: 'runtime.outcome.entry.coverage.v1',
-      payload: JSON.stringify({ signalId, complete, observedAt }),
+      schemaVersion: 'runtime.outcome.entry.coverage.v2',
+      payload: JSON.stringify({
+        signalId,
+        complete,
+        observedAt,
+        g2ParserVersion: 'coingecko.g2.v2',
+      }),
     },
     budget,
   );
@@ -3906,6 +3989,30 @@ function outcomePollIntervalMs(
   return Math.max(base, 120_000);
 }
 
+export function outcomeEvaluationPollRequired(input: {
+  anchorDeliveredAt: number;
+  now: number;
+  horizonsSeconds: readonly number[];
+  maxLatenessSeconds: number;
+  candleIntervalSeconds: number;
+  candles: readonly Pick<Candle, 'openTime' | 'observedAt' | 'isClosed'>[];
+}): boolean {
+  const intervalMs = input.candleIntervalSeconds * 1000;
+  for (const horizonSeconds of input.horizonsSeconds) {
+    const horizonEnd = input.anchorDeliveredAt + horizonSeconds * 1000;
+    const expectedClose = Math.ceil(horizonEnd / intervalMs) * intervalMs;
+    const expectedOpen = expectedClose - intervalMs;
+    const cutoff = input.anchorDeliveredAt + (horizonSeconds + input.maxLatenessSeconds) * 1000;
+    if (input.now < expectedClose || input.now > cutoff) continue;
+    const captured = input.candles.some(
+      (candle) =>
+        candle.isClosed && candle.openTime === expectedOpen && candle.observedAt <= cutoff,
+    );
+    if (!captured) return true;
+  }
+  return false;
+}
+
 function partialFromTrades(
   entry: NormalizedTrade,
   trades: readonly NormalizedTrade[],
@@ -3964,11 +4071,12 @@ function readNormalizedTrades(
   const rows = database
     .prepare(
       `SELECT chain, pool_address, token_address, raw_side, target_side, token_amount, quote_amount,
-              price_usd, event_at, observed_at, tx_hash, provider_trade_id, log_index, leg_index,
-              item_index, identity_key, dedup_status, ambiguity_status
+              volume_usd, price_usd, event_at, observed_at, tx_hash, provider_trade_id, log_index,
+              leg_index, item_index, identity_key, dedup_status, ambiguity_status
        FROM trades
        WHERE chain = ? AND pool_address = ? AND token_address = ?
          AND event_at >= ? AND event_at < ? AND observed_at <= ?
+         AND parser_version = 'coingecko.g2.v2'
        ORDER BY event_at ASC, observed_at ASC, id ASC`,
     )
     .all(
@@ -3987,6 +4095,7 @@ function readNormalizedTrades(
       (row.ambiguity_status !== 'none' && row.ambiguity_status !== 'ambiguous') ||
       typeof row.token_amount !== 'string' ||
       typeof row.quote_amount !== 'string' ||
+      typeof row.volume_usd !== 'string' ||
       typeof row.price_usd !== 'string' ||
       !Number.isSafeInteger(row.event_at) ||
       !Number.isSafeInteger(row.observed_at) ||
@@ -3996,6 +4105,7 @@ function readNormalizedTrades(
     try {
       parseDecimalString(row.token_amount, { nonNegative: true });
       parseDecimalString(row.quote_amount, { nonNegative: true });
+      parseDecimalString(row.volume_usd, { nonNegative: true });
       parseDecimalString(row.price_usd, { nonNegative: true });
     } catch {
       return [];
@@ -4018,6 +4128,7 @@ function readNormalizedTrades(
         targetSide: row.target_side,
         tokenAmount: row.token_amount,
         quoteAmount: row.quote_amount,
+        volumeUsd: row.volume_usd,
         priceUsd: row.price_usd,
         eventAt: row.event_at,
         observedAt: row.observed_at,

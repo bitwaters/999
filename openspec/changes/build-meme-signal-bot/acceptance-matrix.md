@@ -25,6 +25,8 @@
 - 确认刷新修复部署验收：本地提交 `3709d29` 经 lint、typecheck、132 项测试、build、OpenSpec strict、diff check 与 Docker build 后推送唯一 main，再由服务器既有 `deploy.sh` ff-only 拉取，未直接修改服务器。commit=`3709d29`、config hash=`30b7b273…`、schemaVersion=3，app/sampler healthy 且 restart=0；首轮 Level 1 attempted=100、complete=100，部署后只读统计已有 2 个 key 周期、138 个 trades 和 34 个 G2 raw，近 5 分钟 429/临时封禁/刷新失败/探测失败为 0。当前 G2 候选均同时存在 Attention/Organic/G2 等独立拒绝，因此定向 `token.security` 未被触发，符合“仅过期证据阻塞才刷新”的配额门控；新过期记录已保留 armed/level1_checked/pool/safety 等最后 funnel_status。signals/outcomes 仍为 0，11.5–11.7 不得据此勾选。
 - BSC 低索引率根因与修复：线上 Bot 的 SOL/BSC 主发现源是 `trending 1m/5m`，另加 `hot-searches 1m`；持续采样器为观察 newborn 覆盖额外采集了 `market trenches --type new_creation`，因此审计中的 `trenches` 是辅助采样来源，不是线上 1m/5m 主源。服务器只读检查确认旧调度在 `continuous-sampler.mjs:441` 对所有来源共用候选队列，先按最近出现时间截取前 1000 个，再判断重试时间，BSC 前 1000 个几乎被 Trenches 占满，导致大量主源未被查询；这不能归因于 CoinGecko 未收录。`11f59d1` 已在本地 review、102 个测试和 Docker Compose 构建后部署：每链主源优先、辅助源只填充余额，先筛到期再限额，保存真实首次发现/最近发现/下一次重试时间，按 `not_attempted` 等原因拆分并输出 5/15/30/60/120 分钟成熟曲线。正式信号仍保持 CoinGecko 池身份与新鲜 Level 1 fail-closed，覆盖率只作为调度/成熟度审计指标，不作为应用健康硬门槛；sampler 卡顿原因按用户要求暂不展开。
 
+- Outcome 产品正确性复核：服务器真实 BSC quote-target 样本显示 G2 `to=0.003248`、`toq=17315.608…`、`vo=14.9717 USD`，旧 parser 错算出 entry `5,331,160 USD` 和约 63.7 亿倍 delivery drift，并把 token 数量当作 USD Conviction；同一池 OHLCV 约为 `0.00086 USD`。官方合同及真实 SOL/BSC base/quote 抽样共同确认 canonical 公式为 `vo / 目标 token amount`。本地已增加 G2 parser/coverage v2 隔离旧派生事实、原 config snapshot Outcome、horizon 定点补采与 60 秒 lateness；旧 Signal/Outcome 保留审计但全部退出产品放行分母，新 cohort 未达门槛前继续 Shadow。
+
 ## 外部验收保留项
 
 服务器持续累计样本、真实 Signal/Outcome、训练/最近验证切片、参数敏感性、预算评审和 production 放行核对需要持续运行状态，不能由本地静态代码或一次 replay 验收替代。确定性 replay 已由服务器固定 raw 窗口通过；当前配置仍必须保持 `run_mode: shadow`。

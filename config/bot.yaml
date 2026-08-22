@@ -154,7 +154,7 @@ outcomes:
   entry_timeout_seconds: 60
   entry_max_event_delay_seconds: 10
   max_future_event_skew_seconds: 5
-  outcome_max_lateness_seconds: 30
+  outcome_max_lateness_seconds: 60
   candle_interval_seconds: 30
   rest_poll_segments_seconds: [600, 1200, 3600]
 storage:

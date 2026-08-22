@@ -27,7 +27,17 @@ const pool: CanonicalPool = {
 
 const trade = (time: number, id: string, quote = '100') => {
   const parsed = normalizeG2Item(
-    { c: 'G2', n: 'solana', pa: 'pool', ty: 'buy', t: time, to: '10', toq: quote, trade_id: id },
+    {
+      c: 'G2',
+      n: 'solana',
+      pa: 'pool',
+      ty: 'buy',
+      t: time,
+      to: '10',
+      toq: quote,
+      vo: quote,
+      trade_id: id,
+    },
     pool,
     time + 5,
   );

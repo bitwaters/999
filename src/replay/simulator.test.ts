@@ -101,6 +101,19 @@ function level1PoolItem(price: string) {
   };
 }
 
+function g2Payload(eventAt: number, volumeUsd: string) {
+  return {
+    c: 'G2',
+    n: 'solana',
+    pa: pool,
+    ty: 'b',
+    t: eventAt,
+    to: '100',
+    toq: volumeUsd,
+    vo: volumeUsd,
+  };
+}
+
 function evidence(): ReplayEvidence[] {
   return [
     {
@@ -134,21 +147,21 @@ function evidence(): ReplayEvidence[] {
       chain: 'sol',
       poolAddress: pool,
       observedAt: 31_000,
-      payload: { c: 'G2', n: 'solana', pa: pool, ty: 'b', t: 20_000, to: '100', toq: '2000' },
+      payload: g2Payload(20_000, '2000'),
     },
     {
       kind: 'g2',
       chain: 'sol',
       poolAddress: pool,
       observedAt: 61_000,
-      payload: { c: 'G2', n: 'solana', pa: pool, ty: 'b', t: 50_000, to: '100', toq: '2000' },
+      payload: g2Payload(50_000, '2000'),
     },
     {
       kind: 'g2',
       chain: 'sol',
       poolAddress: pool,
       observedAt: 70_000,
-      payload: { c: 'G2', n: 'solana', pa: pool, ty: 'b', t: 69_000, to: '100', toq: '2100' },
+      payload: g2Payload(69_000, '2100'),
     },
   ];
 }
@@ -248,7 +261,7 @@ test('replay warmup seeds cooldown without emitting a pre-window signal', () => 
       chain: 'sol',
       poolAddress: pool,
       observedAt: 151_000,
-      payload: { c: 'G2', n: 'solana', pa: pool, ty: 'b', t: 140_000, to: '100', toq: '2000' },
+      payload: g2Payload(140_000, '2000'),
     },
   ];
   const results = simulateReplay({

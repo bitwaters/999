@@ -11,6 +11,7 @@ import {
   groupLevel1RowsByWorkKind,
   latestLevel1ObservedAt,
   level1ProbeState,
+  level1FunnelAfterBatch,
   level1WorkDueAt,
   nextLevel1ProbeState,
   isConfirmationWindowUsable,
@@ -53,14 +54,16 @@ test('G2 is healthy when no candidate currently requires an active socket', () =
   assert.equal(g2ProbeState(undefined, true), 'failed');
 });
 
-test('Level 1 provider health tolerates candidate-local gaps but fails when none parse', () => {
+test('Level 1 provider health follows supplier batches, not candidate-local gaps', () => {
   assert.equal(level1ProbeState(0, 0), 'unknown');
-  assert.equal(level1ProbeState(50, 43), 'ok');
-  assert.equal(level1ProbeState(50, 0), 'failed');
-  assert.throws(() => level1ProbeState(1, 2), /Invalid Level 1 probe counts/);
+  assert.equal(level1ProbeState(2, 0), 'ok');
+  assert.equal(level1ProbeState(2, 1), 'ok');
+  assert.equal(level1ProbeState(2, 2), 'failed');
+  assert.throws(() => level1ProbeState(1, 2), /Invalid Level 1 batch counts/);
   assert.equal(nextLevel1ProbeState('ok', 0, 0), 'ok');
   assert.equal(nextLevel1ProbeState('unknown', 0, 0), 'unknown');
-  assert.equal(nextLevel1ProbeState('ok', 5, 0), 'failed');
+  assert.equal(nextLevel1ProbeState('ok', 1, 0), 'ok');
+  assert.equal(nextLevel1ProbeState('ok', 1, 1), 'failed');
 });
 
 test('failed Level 1 batches remain visible in attempted and failure health counts', () => {
@@ -85,6 +88,17 @@ test('Level 1 acceptance clocks start when each work kind actually becomes due',
     level1WorkDueAt({ chain: 'bsc', updated_at: 2_000 }, 'armed_batch', refresh),
     32_000,
   );
+});
+
+test('successful Level 1 batches cadence local gaps without corrupting active lifecycles', () => {
+  assert.equal(level1FunnelAfterBatch('scouting', 'pool_resolved', true), 'level1_screened');
+  assert.equal(level1FunnelAfterBatch('scouting', 'pool_resolved', false), 'pool_resolved');
+  assert.equal(level1FunnelAfterBatch('armed', 'armed', true), 'armed');
+  assert.equal(
+    level1FunnelAfterBatch('confirmed-pending-anchor', 'confirmed-pending-anchor', true),
+    'confirmed-pending-anchor',
+  );
+  assert.equal(level1FunnelAfterBatch('delivered', 'delivered', true), 'delivered');
 });
 
 test('scheduler batch evidence preserves cohort clock and per-candidate screening result', () => {

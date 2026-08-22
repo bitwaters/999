@@ -188,25 +188,25 @@ export function g2ProbeState(
   return clientState ?? 'ok';
 }
 
-export function level1ProbeState(attempted: number, complete: number): ProbeState {
+export function level1ProbeState(scheduledBatches: number, failedBatches: number): ProbeState {
   if (
-    !Number.isSafeInteger(attempted) ||
-    attempted < 0 ||
-    !Number.isSafeInteger(complete) ||
-    complete < 0 ||
-    complete > attempted
+    !Number.isSafeInteger(scheduledBatches) ||
+    scheduledBatches < 0 ||
+    !Number.isSafeInteger(failedBatches) ||
+    failedBatches < 0 ||
+    failedBatches > scheduledBatches
   )
-    throw new Error('Invalid Level 1 probe counts');
-  if (attempted === 0) return 'unknown';
-  return complete > 0 ? 'ok' : 'failed';
+    throw new Error('Invalid Level 1 batch counts');
+  if (scheduledBatches === 0) return 'unknown';
+  return failedBatches < scheduledBatches ? 'ok' : 'failed';
 }
 
 export function nextLevel1ProbeState(
   current: ProbeState,
-  attempted: number,
-  complete: number,
+  scheduledBatches: number,
+  failedBatches: number,
 ): ProbeState {
-  return attempted === 0 ? current : level1ProbeState(attempted, complete);
+  return scheduledBatches === 0 ? current : level1ProbeState(scheduledBatches, failedBatches);
 }
 
 export function level1WorkDueAt(
@@ -221,6 +221,16 @@ export function level1WorkDueAt(
         ? refreshSeconds.active[row.chain]
         : refreshSeconds.recheck;
   return row.updated_at + delaySeconds * 1000;
+}
+
+export function level1FunnelAfterBatch(
+  status: string,
+  funnelStatus: string,
+  screened: boolean,
+): string {
+  return screened && !['armed', 'confirmed-pending-anchor', 'delivered'].includes(status)
+    ? 'level1_screened'
+    : funnelStatus;
 }
 
 export function sameChainAddress(chain: 'sol' | 'bsc', left: string, right: string): boolean {
@@ -1374,7 +1384,7 @@ export class ProviderProbe {
       results,
     );
     const { attempted, complete, failures } = summary;
-    this.level1 = nextLevel1ProbeState(this.level1, attempted, complete);
+    this.level1 = nextLevel1ProbeState(this.level1, batchJobs.length, failures);
     this.options.logger(
       this.level1 === 'ok' && failures === 0 ? 'info' : 'warn',
       'level1_probe_summary',
@@ -1487,7 +1497,7 @@ export class ProviderProbe {
         throw error;
       });
 
-    this.touchLevel1CandidateRows(poolRows, observedAt);
+    this.touchLevel1CandidateRows(poolRows, observedAt, true);
     const screeningResults: SchedulerDecisionCandidateEvidence[] = decisionCandidates.map(
       (candidate) => ({ ...candidate, screeningStatus: 'incomplete' }),
     );
@@ -1529,17 +1539,6 @@ export class ProviderProbe {
           this.level1Snapshots.set(parsedPool.pool.identityKey, promoted.snapshot);
         }
       }
-      boundedWrite(this.options.database, this.options.writeBudget, (context) => {
-        const info = this.options.database
-          .prepare(
-            `UPDATE candidates
-             SET funnel_status = CASE WHEN status = 'armed' THEN funnel_status ELSE 'level1_screened' END
-             WHERE id = ? AND chain = ? AND token_address = ? AND pool_address = ?
-               AND safety_status = 'pass' AND status != 'expired'`,
-          )
-          .run(row.id, chain, row.token_address, row.pool_address);
-        context.addRows(info.changes);
-      });
     }
     if (supplierRequestStarted)
       this.recordSchedulerDecision({
@@ -1553,16 +1552,23 @@ export class ProviderProbe {
     return { attempted: poolRows.length, complete };
   }
 
-  private touchLevel1CandidateRows(rows: Level1CandidateRow[], at: number): void {
+  private touchLevel1CandidateRows(rows: Level1CandidateRow[], at: number, screened = false): void {
     boundedWrite(this.options.database, this.options.writeBudget, (context) => {
       const update = this.options.database.prepare(
-        `UPDATE candidates SET updated_at = ?
+        `UPDATE candidates
+         SET updated_at = ?, funnel_status = ?
          WHERE id = ? AND cycle_started_at = ? AND config_version_id = ?
            AND safety_status = 'pass' AND status != 'expired'`,
       );
       for (const row of rows)
         context.addRows(
-          update.run(at, row.id, row.cycle_started_at, this.options.configVersionId).changes,
+          update.run(
+            at,
+            level1FunnelAfterBatch(row.status, row.funnel_status, screened),
+            row.id,
+            row.cycle_started_at,
+            this.options.configVersionId,
+          ).changes,
         );
     });
   }

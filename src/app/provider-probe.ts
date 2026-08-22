@@ -396,6 +396,46 @@ export function selectLevel1CandidateRows(
     ) as Level1CandidateRow[];
 }
 
+export function readLevel1Backlog(
+  database: SqliteDatabase,
+  configVersionId: number,
+  now: number,
+  ttlSeconds: Record<'sol' | 'bsc', number>,
+  refreshSeconds: { recheck: number; active: Record<'sol' | 'bsc', number> },
+): { count: number; oldestAt: number | null } {
+  const row = database
+    .prepare(
+      `WITH eligible AS (
+         SELECT CASE
+                  WHEN status IN ('armed', 'confirmed-pending-anchor', 'delivered')
+                    THEN updated_at + CASE chain WHEN 'sol' THEN ? ELSE ? END
+                  WHEN funnel_status NOT IN ('level1_screened', 'level1_checked')
+                    THEN updated_at
+                  ELSE updated_at + ?
+                END AS due_at
+         FROM candidates
+         WHERE config_version_id = ? AND safety_status = 'pass' AND status != 'expired'
+           AND pool_address IS NOT NULL
+           AND (status IN ('armed', 'confirmed-pending-anchor', 'delivered')
+                OR CAST(json_extract(safety_json, '$.expiresAt') AS INTEGER) > ?)
+           AND (status IN ('armed', 'confirmed-pending-anchor', 'delivered')
+                OR last_seen_at >= CASE chain WHEN 'sol' THEN ? ELSE ? END)
+       )
+       SELECT COUNT(*) AS count, MIN(due_at) AS oldest_at FROM eligible WHERE due_at <= ?`,
+    )
+    .get(
+      refreshSeconds.active.sol * 1000,
+      refreshSeconds.active.bsc * 1000,
+      refreshSeconds.recheck * 1000,
+      configVersionId,
+      now,
+      now - ttlSeconds.sol * 1000,
+      now - ttlSeconds.bsc * 1000,
+      now,
+    ) as { count: number; oldest_at: number | null };
+  return { count: Number(row.count), oldestAt: row.oldest_at };
+}
+
 type ArmCandidateRow = {
   id: number;
   chain: 'sol' | 'bsc';
@@ -685,23 +725,23 @@ export class ProviderProbe {
     const providerStates = [this.gmgn, this.coingecko];
     const scheduler = this.coinGeckoScheduler.stats();
     const now = Date.now();
-    const persisted = this.options.database
-      .prepare(
-        `SELECT COUNT(*) AS count, MIN(updated_at) AS oldest_at FROM candidates
-         WHERE config_version_id = ? AND safety_status = 'pass' AND status != 'expired'
-           AND pool_address IS NOT NULL
-           AND (status IN ('armed', 'confirmed-pending-anchor', 'delivered')
-                OR CAST(json_extract(safety_json, '$.expiresAt') AS INTEGER) > ?)
-           AND (status IN ('armed', 'confirmed-pending-anchor', 'delivered')
-                OR last_seen_at >= CASE chain WHEN 'sol' THEN ? ELSE ? END)`,
-      )
-      .get(
-        this.options.configVersionId,
-        now,
-        now - this.options.config.chains.sol.discovery.candidate_ttl_seconds * 1000,
-        now - this.options.config.chains.bsc.discovery.candidate_ttl_seconds * 1000,
-      ) as { count: number; oldest_at: number | null };
-    const persistedDue = Number(persisted.count);
+    const persisted = readLevel1Backlog(
+      this.options.database,
+      this.options.configVersionId,
+      now,
+      {
+        sol: this.options.config.chains.sol.discovery.candidate_ttl_seconds,
+        bsc: this.options.config.chains.bsc.discovery.candidate_ttl_seconds,
+      },
+      {
+        recheck: this.options.config.providers.coingecko.scheduler.dynamic_recheck_seconds,
+        active: {
+          sol: this.options.config.chains.sol.level1.refresh_interval_seconds,
+          bsc: this.options.config.chains.bsc.level1.refresh_interval_seconds,
+        },
+      },
+    );
+    const persistedDue = persisted.count;
     return {
       provider: providerStates.every((state) => state === 'ok')
         ? 'ok'
@@ -722,7 +762,7 @@ export class ProviderProbe {
         effectiveRpm: scheduler.effectiveRpm,
         persistedDue,
         persistedOldestWaitMs:
-          persisted.oldest_at === null ? 0 : Math.max(0, now - persisted.oldest_at),
+          persisted.oldestAt === null ? 0 : Math.max(0, now - persisted.oldestAt),
         batchConcurrency: scheduler.batchConcurrency,
         tradeConcurrency: scheduler.tradeConcurrency,
         creditDeferred: scheduler.creditDeferred,

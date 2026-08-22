@@ -14,6 +14,7 @@ import {
   level1FunnelAfterBatch,
   level1WorkDueAt,
   nextLevel1ProbeState,
+  readLevel1Backlog,
   isConfirmationWindowUsable,
   refreshConfirmationEvidence,
   selectArmCandidateRows,
@@ -464,6 +465,16 @@ test('Level 1 polls new pools immediately but waits for configured recheck caden
   assert.deepEqual(
     rows.map((row) => row.token_address),
     ['new', 'due-recheck'],
+  );
+  assert.deepEqual(
+    readLevel1Backlog(
+      database,
+      1,
+      100_000,
+      { sol: 600, bsc: 600 },
+      { recheck: 45, active: { sol: 45, bsc: 45 } },
+    ),
+    { count: 2, oldestAt: 50_000 + 45_000 },
   );
   database.close();
 });

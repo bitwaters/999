@@ -52,8 +52,6 @@ test('Outcome restores its immutable pool identity after the candidate leaves ru
       provider: 'coingecko',
       capability: 'pools.multi.level1',
       chain: 'bsc',
-      tokenAddress: tokenAddress.toUpperCase(),
-      poolAddress: poolAddress.toUpperCase(),
       observedAt: 2_000,
       schemaVersion: 'coingecko.pools.multi.v1',
       payload: JSON.stringify({
@@ -79,7 +77,14 @@ test('Outcome restores its immutable pool identity after the candidate leaves ru
     { maxRows: 10, maxMs: 1_000 },
   );
 
-  const restored = readPersistedOutcomePool(database, 'bsc', tokenAddress, poolAddress);
+  const restored = readPersistedOutcomePool(
+    database,
+    'bsc',
+    tokenAddress,
+    `0x${poolAddress.slice(2).toUpperCase()}`,
+    1_000,
+    2_500,
+  );
   assert.equal(restored?.identityKey, `bsc:${poolAddress}:${tokenAddress}`);
   assert.equal(restored?.targetSide, 'base');
   assert.equal(restored && readOutcomeEntryCoverage(database, 7, restored), undefined);

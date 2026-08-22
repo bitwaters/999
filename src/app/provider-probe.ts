@@ -2251,6 +2251,7 @@ export class ProviderProbe {
       }
       this.markSignalDelivered(row.signal_id);
       const signal = parseSignalSnapshot(row.snapshot_json);
+      if (!signal) continue;
       const pool = row.pool_address
         ? ([...this.level1Pools.values()].find(
             (candidate) =>
@@ -2263,9 +2264,11 @@ export class ProviderProbe {
             row.chain,
             row.token_address,
             row.pool_address,
+            signal.cycleStartedAt,
+            signal.confirmedAt,
           ))
         : undefined;
-      if (!signal || !pool || row.target_side === null) continue;
+      if (!pool || row.target_side === null) continue;
       this.level1Pools.set(pool.identityKey, pool);
       const now = Date.now();
       const entryCoverageUntil =
@@ -3486,12 +3489,14 @@ export function readPersistedOutcomePool(
   chain: 'sol' | 'bsc',
   tokenAddress: string,
   poolAddress: string,
+  cycleStartedAt = 0,
+  confirmedAt = Number.MAX_SAFE_INTEGER,
 ): CanonicalPool | undefined {
   const addressClause =
     chain === 'bsc'
       ? 'lower(pool_address) = lower(?) AND lower(token_address) = lower(?)'
       : 'pool_address = ? AND token_address = ?';
-  const events = database
+  const exactEvents = database
     .prepare(
       `SELECT payload_encoding, payload
        FROM provider_events
@@ -3503,8 +3508,20 @@ export function readPersistedOutcomePool(
     payload_encoding: 'identity' | 'gzip';
     payload: Buffer;
   }>;
+  const fallbackEvents = database
+    .prepare(
+      `SELECT payload_encoding, payload
+       FROM provider_events
+       WHERE provider = 'coingecko' AND capability = 'pools.multi.level1'
+         AND chain = ? AND observed_at BETWEEN ? AND ?
+       ORDER BY observed_at DESC LIMIT 100`,
+    )
+    .all(chain, cycleStartedAt, confirmedAt) as Array<{
+    payload_encoding: 'identity' | 'gzip';
+    payload: Buffer;
+  }>;
   const network = chain === 'sol' ? 'solana' : 'bsc';
-  for (const event of events) {
+  for (const event of [...exactEvents, ...fallbackEvents]) {
     try {
       const payload = coingeckoPoolBatchRawSchema.parse(
         JSON.parse(decodeProviderPayload(event.payload, event.payload_encoding)),

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { CanonicalPool } from './pools.js';
 import {
+  advanceLevel1SnapshotWithTrade,
   parseLevel1ScreeningSnapshot,
   promoteLevel1ScreeningSnapshot,
   type RawLevel1Screening,
@@ -160,4 +161,56 @@ test('only identity-matched REST or G2 event time promotes screening evidence', 
     observedAt: 601_000,
   });
   assert.equal(mismatch.status, 'incomplete');
+});
+
+test('first G2 trade advances a newer screening exactly once and establishes its price baseline', () => {
+  const initialScreening = parseLevel1ScreeningSnapshot(
+    raw({ price_usd: '1.00' }),
+    solPool,
+    600_000,
+  );
+  const refreshedScreening = parseLevel1ScreeningSnapshot(
+    raw({ price_usd: '1.25' }),
+    solPool,
+    650_000,
+  );
+  assert.equal(initialScreening.status, 'complete');
+  assert.equal(refreshedScreening.status, 'complete');
+  if (initialScreening.status !== 'complete' || refreshedScreening.status !== 'complete') return;
+  const initial = promoteLevel1ScreeningSnapshot(initialScreening.snapshot, {
+    source: 'rest',
+    chain: 'sol',
+    poolAddress: solPool.poolAddress,
+    tokenAddress: solPool.tokenAddress,
+    eventAt: 599_000,
+    observedAt: 601_000,
+  });
+  assert.equal(initial.status, 'complete');
+  if (initial.status !== 'complete') return;
+
+  const advanced = advanceLevel1SnapshotWithTrade(refreshedScreening.snapshot, initial.snapshot, {
+    source: 'g2',
+    chain: 'sol',
+    poolAddress: solPool.poolAddress,
+    tokenAddress: solPool.tokenAddress,
+    eventAt: 651_000,
+    observedAt: 652_000,
+  });
+  assert.equal(advanced.status, 'complete');
+  if (advanced.status !== 'complete') return;
+  assert.equal(advanced.previous.priceUsd, '1');
+  assert.equal(advanced.current.priceUsd, '1.25');
+  assert.equal(advanced.current.lastTradeAt, 651_000);
+
+  assert.deepEqual(
+    advanceLevel1SnapshotWithTrade(refreshedScreening.snapshot, advanced.current, {
+      source: 'g2',
+      chain: 'sol',
+      poolAddress: solPool.poolAddress,
+      tokenAddress: solPool.tokenAddress,
+      eventAt: 653_000,
+      observedAt: 654_000,
+    }),
+    { status: 'unchanged' },
+  );
 });

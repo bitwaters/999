@@ -89,6 +89,11 @@
 - **WHEN** Armed 候选已有持续、身份匹配且完整的 G2 成交事件
 - **THEN** 周期性 Level 1 刷新只使用批量池快照与真实 G2 事件，不得每轮重新下载该池最近 300 笔 trades
 
+#### Scenario: 新批量快照早于首笔 G2 成交
+
+- **WHEN** Armed 候选已有比当前完整 Level 1 更新的批量筛选快照，但该批量完成时尚无可验证成交，随后收到首笔身份匹配的 G2 成交
+- **THEN** 系统立即用该成交补全新快照并以原完整快照建立价格基线；同一批量快照不得被后续 G2 重复轮转，也不得等待下一轮批量刷新
+
 ### Requirement: 交易时间和稳定性不得被推测为通过
 
 系统 MUST 只从身份匹配的 REST trades 或 G2 事件读取 last_trade_at；批量请求 observed_at 不得转换为成交时间。池稳定性 MUST 由已绑定 pool/base/quote/target side 身份、REST/G2 能力、条件适用的 migration 状态和证据完整性判定，不得因解析成功固定写为 stable，也不得把正常 reserve/composition 数值变化视为身份冲突。

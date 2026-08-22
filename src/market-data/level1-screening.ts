@@ -201,6 +201,22 @@ export function promoteLevel1ScreeningSnapshot(
   };
 }
 
+export function advanceLevel1SnapshotWithTrade(
+  screening: Level1ScreeningSnapshot,
+  current: Level1Snapshot,
+  evidence: LastTradeEvidence,
+):
+  | { status: 'unchanged' }
+  | { status: 'complete'; previous: Level1Snapshot; current: Level1Snapshot }
+  | { status: 'incomplete'; reasons: string[] } {
+  // observedAt on the complete snapshot includes its trade observation. Requiring a strictly
+  // newer screening snapshot prevents every G2 trade from rotating the same REST price twice.
+  if (screening.observedAt <= current.observedAt) return { status: 'unchanged' };
+  const promoted = promoteLevel1ScreeningSnapshot(screening, evidence);
+  if (promoted.status !== 'complete') return promoted;
+  return { status: 'complete', previous: current, current: promoted.snapshot };
+}
+
 function readWindows(
   value: unknown,
   poolCreatedAt: number | undefined,

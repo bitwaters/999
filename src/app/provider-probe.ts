@@ -49,6 +49,7 @@ import {
 } from '../providers/coingecko-adapter.js';
 import { isLevel1Fresh, parseLevel1Snapshot, type Level1Snapshot } from '../market-data/level1.js';
 import {
+  advanceLevel1SnapshotWithTrade,
   parseLevel1ScreeningSnapshot,
   promoteLevel1ScreeningSnapshot,
   type Level1ScreeningSnapshot,
@@ -2977,9 +2978,34 @@ export class ProviderProbe {
             );
           context.addRows(info.changes);
         });
+        this.advanceLevel1FromG2(pool, trade);
         this.tryCreateLiveSignal(trade);
       }
     }
+  }
+
+  private advanceLevel1FromG2(pool: CanonicalPool, trade: NormalizedTrade): void {
+    const identityKey = pool.identityKey;
+    const screening = this.level1ScreeningSnapshots.get(identityKey);
+    const current = this.level1Snapshots.get(identityKey);
+    if (!screening || !current) return;
+    const advanced = advanceLevel1SnapshotWithTrade(screening, current, {
+      source: 'g2',
+      chain: trade.chain,
+      poolAddress: trade.poolAddress,
+      tokenAddress: trade.tokenAddress,
+      eventAt: trade.eventAt,
+      observedAt: trade.observedAt,
+    });
+    if (advanced.status !== 'complete') return;
+    this.previousLevel1Snapshots.set(identityKey, advanced.previous);
+    this.level1Snapshots.set(identityKey, advanced.current);
+    this.options.logger('info', 'level1_screening_promoted_by_g2', {
+      chain: trade.chain,
+      pool_address: trade.poolAddress,
+      screening_observed_at: screening.observedAt,
+      trade_observed_at: trade.observedAt,
+    });
   }
 
   private tryCreateLiveSignal(

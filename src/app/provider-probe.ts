@@ -321,6 +321,37 @@ export function armedSubscriptionsToRelease(
     .sort();
 }
 
+export function g2OccupiedIdentities(
+  active: ReadonlyMap<string, 'armed' | 'confirmed-pending-anchor'>,
+  desiredArmed: ReadonlySet<string>,
+): Set<string> {
+  const occupied = new Set(desiredArmed);
+  for (const [identityKey, state] of active)
+    if (state === 'confirmed-pending-anchor') occupied.add(identityKey);
+  return occupied;
+}
+
+export function candidateRediscoveryState(input: {
+  status: string;
+  funnelStatus: string;
+  previousConfigVersionId: number;
+  currentConfigVersionId: number;
+}): { preserveHistorical: boolean; status: string; funnelStatus: string } {
+  if (['confirmed-pending-anchor', 'delivered', 'completed'].includes(input.status))
+    return {
+      preserveHistorical: true,
+      status: input.status,
+      funnelStatus: input.funnelStatus,
+    };
+  if (input.previousConfigVersionId !== input.currentConfigVersionId)
+    return { preserveHistorical: false, status: 'scouting', funnelStatus: 'safety_checked' };
+  return {
+    preserveHistorical: false,
+    status: input.status,
+    funnelStatus: input.funnelStatus === 'armed' ? 'armed' : 'safety_checked',
+  };
+}
+
 export function planExistingG2Capacity<T extends { row: { status: string; chain: 'sol' | 'bsc' } }>(
   rows: T[],
   capacity: number,
@@ -1144,10 +1175,12 @@ export class ProviderProbe {
       );
       const existing = this.options.database
         .prepare(
-          'SELECT id FROM candidates WHERE chain = ? AND token_address = ? AND cycle_started_at = ?',
+          `SELECT id, status, funnel_status, config_version_id FROM candidates
+           WHERE chain = ? AND token_address = ? AND cycle_started_at = ?`,
         )
-        .pluck()
-        .get(cycle.chain, cycle.tokenAddress, cycle.cycleStartedAt);
+        .get(cycle.chain, cycle.tokenAddress, cycle.cycleStartedAt) as
+        | { id: number; status: string; funnel_status: string; config_version_id: number }
+        | undefined;
       boundedWrite(this.options.database, this.options.writeBudget, (context) => {
         if (existing === undefined) {
           const info = this.options.database
@@ -1172,26 +1205,38 @@ export class ProviderProbe {
             );
           context.addRows(info.changes);
         } else {
-          const info = this.options.database
-            .prepare(
-              `UPDATE candidates SET last_seen_at = ?,
-               status = CASE WHEN status IN ('armed', 'confirmed-pending-anchor', 'delivered', 'completed')
-                             THEN status ELSE ? END,
-               safety_status = ?, safety_json = ?, config_version_id = ?,
-               funnel_status = CASE WHEN funnel_status IN ('armed', 'confirmed-pending-anchor', 'delivered', 'completed')
-                                    THEN funnel_status ELSE 'safety_checked' END,
-               updated_at = ? WHERE id = ?`,
-            )
-            .run(
-              cycle.lastSeenAt,
-              cycle.status,
-              safety.status,
-              JSON.stringify(safety),
-              this.options.configVersionId,
-              Date.now(),
-              existing,
-            );
-          context.addRows(info.changes);
+          const rediscovery = candidateRediscoveryState({
+            status: existing.status,
+            funnelStatus: existing.funnel_status,
+            previousConfigVersionId: existing.config_version_id,
+            currentConfigVersionId: this.options.configVersionId,
+          });
+          if (rediscovery.preserveHistorical) {
+            const info = this.options.database
+              .prepare('UPDATE candidates SET last_seen_at = ? WHERE id = ?')
+              .run(cycle.lastSeenAt, existing.id);
+            context.addRows(info.changes);
+          } else {
+            const info = this.options.database
+              .prepare(
+                `UPDATE candidates SET last_seen_at = ?,
+                 status = ?,
+                 safety_status = ?, safety_json = ?, config_version_id = ?,
+                 funnel_status = ?,
+                 updated_at = ? WHERE id = ?`,
+              )
+              .run(
+                cycle.lastSeenAt,
+                rediscovery.status,
+                safety.status,
+                JSON.stringify(safety),
+                this.options.configVersionId,
+                rediscovery.funnelStatus,
+                Date.now(),
+                existing.id,
+              );
+            context.addRows(info.changes);
+          }
         }
       });
       if (result.closedCycle) this.closeCandidate(result.closedCycle);
@@ -1731,7 +1776,15 @@ export class ProviderProbe {
       if (!canArmG2Candidate(row.status, row.funnel_status, attention.status)) continue;
       eligible.push({ row, pool, screening });
     }
-    if (eligible.length === 0 && existingArmed.length === 0) return;
+    if (eligible.length === 0 && existingArmed.length === 0) {
+      if (this.g2Client) {
+        const active = this.g2Client.active();
+        for (const identityKey of armedSubscriptionsToRelease(active, new Set()))
+          this.g2Client.unset(identityKey);
+        this.finalistReservations.reconcileOccupied(g2OccupiedIdentities(active, new Set()));
+      }
+      return;
+    }
     const g2Client = await this.ensureG2Client(key);
     const capacityPlan = planExistingG2Capacity(
       existingArmed,
@@ -1739,9 +1792,10 @@ export class ProviderProbe {
     );
     if (capacityPlan.demoted.length > 0) this.demoteArmedForG2Capacity(capacityPlan.demoted);
     const desired = new Set(capacityPlan.retained.map(({ pool }) => pool.identityKey));
-    for (const identityKey of armedSubscriptionsToRelease(g2Client.active(), desired))
+    const active = g2Client.active();
+    for (const identityKey of armedSubscriptionsToRelease(active, desired))
       g2Client.unset(identityKey);
-    this.finalistReservations.reconcileOccupied(desired);
+    this.finalistReservations.reconcileOccupied(g2OccupiedIdentities(active, desired));
     for (const { row, pool } of capacityPlan.retained) {
       const state = row.status === 'armed' ? 'armed' : 'confirmed-pending-anchor';
       if (state === 'confirmed-pending-anchor' && !g2Client.active().has(pool.identityKey))

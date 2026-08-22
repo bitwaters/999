@@ -60,6 +60,8 @@ GMGN 发现只更新 Candidate 并把合格工作放入内存调度器，不再�
 
 候选只有取得绑定 Candidate Cycle 与主池身份的逻辑容量预留，才允许启动初始化 `/trades`。同一身份只允许一个在途初始化请求；临时错误按集中配置有界重试，成功补证后原子地把预留转换为 Armed 容量，再由 Armed 发起真实 G2 订阅。已有 Armed/pending anchor 的确认补证和明确恢复沿用其实际占用，不重复申请 finalist reservation。预留超时、身份变化、Cycle 结束或合法抢占时立即释放，候选只要仍有效即可在后续批次重新竞争。
 
+配置版本切换时，同一 Candidate Cycle 中尚未确认的旧版本 Armed 必须回到 `scouting/safety_checked`，由新版本重新竞争预留并留下完整事件链；`confirmed-pending-anchor`、`delivered`、`completed` 属于已形成信号/Outcome 的历史锚点，其配置版本和生命周期不可被后续 discovery 覆写。这样既不复制 Candidate Cycle，也不把旧规则状态伪装成新 cohort 样本。
+
 reservation 不预先创建 G2 socket，也不新增持久化表。关键状态转换写内部 runtime event 供审计和 replay；进程重启一律视内存预留失效，再根据 active candidates 和实际 G2 占用重建，从而避免幽灵容量。
 
 ### 8. 截止时间调度同时保护确认与 Outcome

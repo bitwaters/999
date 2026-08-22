@@ -3,11 +3,13 @@ import assert from 'node:assert/strict';
 import {
   armedSubscriptionsToRelease,
   buildSchedulerDecisionPayload,
+  candidateRediscoveryState,
   canArmG2Candidate,
   createCandidatePoolBatches,
   evaluateCandidateAttention,
   expireStaleCandidateRows,
   g2ProbeState,
+  g2OccupiedIdentities,
   groupLevel1RowsByWorkKind,
   latestLevel1ObservedAt,
   level1ProbeState,
@@ -296,6 +298,50 @@ test('G2 reconciliation releases obsolete Armed pools but preserves pending anch
   assert.deepEqual(armedSubscriptionsToRelease(active, new Set(['bsc:keep:token'])), [
     'bsc:old:token',
   ]);
+  assert.deepEqual([...g2OccupiedIdentities(active, new Set(['bsc:keep:token']))].sort(), [
+    'bsc:keep:token',
+    'sol:anchor:token',
+  ]);
+});
+
+test('candidate rediscovery keeps anchor history immutable and requeues old-config Armed state', () => {
+  assert.deepEqual(
+    candidateRediscoveryState({
+      status: 'armed',
+      funnelStatus: 'armed',
+      previousConfigVersionId: 49,
+      currentConfigVersionId: 52,
+    }),
+    { preserveHistorical: false, status: 'scouting', funnelStatus: 'safety_checked' },
+  );
+  assert.deepEqual(
+    candidateRediscoveryState({
+      status: 'armed',
+      funnelStatus: 'armed',
+      previousConfigVersionId: 52,
+      currentConfigVersionId: 52,
+    }),
+    { preserveHistorical: false, status: 'armed', funnelStatus: 'armed' },
+  );
+  for (const status of ['confirmed-pending-anchor', 'delivered', 'completed'])
+    assert.deepEqual(
+      candidateRediscoveryState({
+        status,
+        funnelStatus: status,
+        previousConfigVersionId: 49,
+        currentConfigVersionId: 52,
+      }),
+      { preserveHistorical: true, status, funnelStatus: status },
+    );
+  assert.deepEqual(
+    candidateRediscoveryState({
+      status: 'scouting',
+      funnelStatus: 'safety_checked',
+      previousConfigVersionId: 52,
+      currentConfigVersionId: 52,
+    }),
+    { preserveHistorical: false, status: 'scouting', funnelStatus: 'safety_checked' },
+  );
 });
 
 test('G2 capacity shrink preserves pending anchors and requeues Armed candidates', () => {

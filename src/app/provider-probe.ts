@@ -304,19 +304,29 @@ export function armedSubscriptionsToRelease(
     .sort();
 }
 
-export function planExistingG2Capacity<T extends { row: { status: string } }>(
+export function planExistingG2Capacity<T extends { row: { status: string; chain: 'sol' | 'bsc' } }>(
   rows: T[],
   capacity: number,
 ): { retained: T[]; demoted: T[]; overflowed: boolean } {
   if (!Number.isSafeInteger(capacity) || capacity <= 0) throw new Error('Invalid G2 capacity');
-  if (rows.length <= capacity) return { retained: rows, demoted: [], overflowed: false };
   const retained = rows
     .filter(({ row }) => row.status === 'confirmed-pending-anchor')
     .slice(0, capacity);
+  const chainLimit = Math.max(1, Math.floor(capacity / 2));
+  const chainCounts = { sol: 0, bsc: 0 };
+  for (const { row } of retained) chainCounts[row.chain] += 1;
+  for (const item of rows) {
+    if (retained.length >= capacity) break;
+    if (item.row.status !== 'armed' || chainCounts[item.row.chain] >= chainLimit) continue;
+    retained.push(item);
+    chainCounts[item.row.chain] += 1;
+  }
+  const retainedSet = new Set(retained);
+  const demoted = rows.filter((item) => item.row.status === 'armed' && !retainedSet.has(item));
   return {
     retained,
-    demoted: rows.filter(({ row }) => row.status === 'armed'),
-    overflowed: true,
+    demoted,
+    overflowed: rows.length > retained.length,
   };
 }
 
@@ -1773,6 +1783,12 @@ export class ProviderProbe {
       if (leftWaitingSince !== rightWaitingSince) return leftWaitingSince - rightWaitingSince;
       return left.pool.identityKey.localeCompare(right.pool.identityKey);
     });
+    const chainCapacity = Math.max(
+      1,
+      Math.floor(this.options.config.providers.coingecko.g2.max_subscriptions_per_socket / 2),
+    );
+    const occupiedByChain = { sol: 0, bsc: 0 };
+    for (const { row } of capacityPlan.retained) occupiedByChain[row.chain] += 1;
     const initializationJobs: Array<Promise<void>> = [];
     for (const [index, item] of eligible.entries()) {
       const identity = {
@@ -1781,6 +1797,19 @@ export class ProviderProbe {
         poolAddress: item.row.pool_address,
         cycleStartedAt: item.row.cycle_started_at,
       };
+      if (occupiedByChain[item.row.chain] >= chainCapacity) {
+        this.recordSchedulerDecision({
+          decision: 'defer',
+          reason: 'finalist_chain_capacity',
+          priority: 'candidate_batch',
+          chain: item.row.chain,
+          tokenAddress: item.row.token_address,
+          poolAddress: item.row.pool_address,
+          cycleStartedAt: item.row.cycle_started_at,
+          dedupeKey: `chain-capacity:${finalistKey(identity)}`,
+        });
+        continue;
+      }
       const reservation = this.finalistReservations.acquire(
         identity,
         Date.now(),
@@ -1801,7 +1830,9 @@ export class ProviderProbe {
         continue;
       }
       if (reservation.status === 'acquired') {
+        occupiedByChain[item.row.chain] += 1;
         this.schedulerDecisionKeys.delete(`capacity:${finalistKey(identity)}`);
+        this.schedulerDecisionKeys.delete(`chain-capacity:${finalistKey(identity)}`);
         this.recordSchedulerDecision({
           decision: 'reservation_acquired',
           reason: 'attention_structure_capacity_pass',

@@ -229,21 +229,22 @@ test('G2 reconciliation releases obsolete Armed pools but preserves pending anch
 
 test('G2 capacity shrink preserves pending anchors and requeues Armed candidates', () => {
   const rows = [
-    { row: { status: 'confirmed-pending-anchor' }, id: 'anchor' },
-    { row: { status: 'armed' }, id: 'a' },
-    { row: { status: 'armed' }, id: 'b' },
+    { row: { status: 'confirmed-pending-anchor', chain: 'sol' as const }, id: 'anchor' },
+    { row: { status: 'armed', chain: 'sol' as const }, id: 'sol-a' },
+    { row: { status: 'armed', chain: 'sol' as const }, id: 'sol-b' },
+    { row: { status: 'armed', chain: 'bsc' as const }, id: 'bsc-a' },
   ];
-  const plan = planExistingG2Capacity(rows, 2);
+  const plan = planExistingG2Capacity(rows, 4);
   assert.equal(plan.overflowed, true);
   assert.deepEqual(
     plan.retained.map((row) => row.id),
-    ['anchor'],
+    ['anchor', 'sol-a', 'bsc-a'],
   );
   assert.deepEqual(
     plan.demoted.map((row) => row.id),
-    ['a', 'b'],
+    ['sol-b'],
   );
-  assert.equal(planExistingG2Capacity(rows.slice(0, 2), 2).overflowed, false);
+  assert.equal(planExistingG2Capacity(rows.slice(0, 2), 4).overflowed, false);
 });
 
 test('candidate Attention accepts improvement from any allowed discovery source', () => {

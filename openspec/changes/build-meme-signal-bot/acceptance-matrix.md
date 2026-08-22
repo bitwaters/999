@@ -28,6 +28,7 @@
 - Outcome 产品正确性复核：服务器真实 BSC quote-target 样本显示 G2 `to=0.003248`、`toq=17315.608…`、`vo=14.9717 USD`，旧 parser 错算出 entry `5,331,160 USD` 和约 63.7 亿倍 delivery drift，并把 token 数量当作 USD Conviction；同一池 OHLCV 约为 `0.00086 USD`。官方合同及真实 SOL/BSC base/quote 抽样共同确认 canonical 公式为 `vo / 目标 token amount`。本地已增加 G2 parser/coverage v2 隔离旧派生事实、原 config snapshot Outcome、horizon 定点补采与 60 秒 lateness；旧 Signal/Outcome 保留审计但全部退出产品放行分母，新 cohort 未达门槛前继续 Shadow。
 - Armed 刷新时钟复核：cohort 62 中同一候选在 120 秒 lease 内四个 30 秒窗口均出现 `entry_quality:missing_price_baseline`，对应 `armed_batch` 直到 lease 结束后才完成。根因是供应商重复 discovery 更新了候选兼作 Level 1 due clock 的 `updated_at`。本地最小修复仅在同配置 Armed 重发现时保留原工作时钟；旧配置仍回到 scouting 并重置时钟，历史/锚点仍保持不可变。该发现使 cohort 62 不能承担最终工程或产品放行，必须经 main/deploy.sh 部署新 cohort 后验证首个 Armed 刷新不再被重发现延期。
 - Armed 首笔 G2 基线复核：cohort 63 的四个可疑池只读调度时间线证明首个 Armed batch 均按 45 秒到期，完成落后 due 约 1.5–6.2 秒，重复发现延期已消失；但真实 G2 时间线暴露另一缺口：批量完成时若还没有成交，只保存筛选快照，首笔 G2 到来后不会立即补全，导致 `missing_price_baseline` 持续到下一轮批量，租约尾部成交可能在补全前被轮换。最小修复在 G2 入库后只对严格更新的批量筛选快照执行一次身份匹配补全，以当前完整快照作为 previous；同批后续成交不重复轮转，不新增 API、表或配置。cohort 63 保留审计但不承担最终工程放行，需新 cohort 验证首笔 G2 后不再出现该缺口。
+- Outcome 非对齐 horizon 复核：v2 entry/volume/price 已确认正确，但真实 Outcome 8 的五个 horizon 全部错误落为 `path:missing_complete_coverage`。根因不是供应商缺 K，而是路径筛选只保留名义 horizon 前已闭合 candle，完整性循环却又要求覆盖 horizon 的 candle；anchor+h 不在 30 秒边界时该 candle 必然同时被排除和要求。最小修复让 forward return、MFE、MAE 共用同一根最早 eligible evaluation close 作为终点，并要求 entry partial 后到该 close 的连续完整 30 秒路径；不延长 G2、不加表或采集路由。旧 Outcome 保持不可变审计，新部署 cohort 才能进入产品分母。
 
 ## 外部验收保留项
 

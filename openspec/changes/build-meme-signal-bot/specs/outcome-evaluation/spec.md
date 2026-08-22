@@ -48,7 +48,12 @@
 - **THEN** MFE/MAE 起点只使用 entry 之后且覆盖完整的数据
 
 ### Requirement: 收益路径公式必须固定
-系统 SHALL 使用同池、同目标方向、canonical USD price 计算 `pre_send_drift=latest_pre_send_price/confirmation_price-1`、`delivery_drift=entry_price/confirmation_price-1`、`forward_return(h)=eligible_evaluation_close(h)/entry_price-1`、`MFE(h)=max(complete_high/entry_price-1)` 和 `MAE(h)=min(complete_low/entry_price-1)`。eligible evaluation close 必须是 close_time 位于 anchor_delivered_at+h 至其后允许迟到范围内、observed_at 不晚于 cutoff 的最早 complete candle close；MFE/MAE 路径从 entry observed_at 到 anchor_delivered_at+h。默认 horizon 为 1m、5m、10m、30m、60m，并允许由唯一配置修改。
+系统 SHALL 使用同池、同目标方向、canonical USD price 计算 `pre_send_drift=latest_pre_send_price/confirmation_price-1`、`delivery_drift=entry_price/confirmation_price-1`、`forward_return(h)=eligible_evaluation_close(h)/entry_price-1`、`MFE(h)=max(complete_high/entry_price-1)` 和 `MAE(h)=min(complete_low/entry_price-1)`。eligible evaluation close 必须是 close_time 位于 anchor_delivered_at+h 至其后允许迟到范围内、observed_at 不晚于 cutoff 的最早 complete candle close；MFE/MAE 路径从 entry observed_at 连续覆盖到同一 eligible evaluation close，entry partial 之后不得缺少完整 candle。默认 horizon 为 1m、5m、10m、30m、60m，并允许由唯一配置修改。
+
+#### Scenario: horizon 不在 30 秒边界
+
+- **WHEN** anchor_delivered_at+h 落在一个 30 秒 candle 内
+- **THEN** forward return、MFE 和 MAE 使用同一根最早合格闭合 candle 作为终点，并要求从 entry partial 之后到该 candle 的完整连续路径；不得要求一根同时在名义 horizon 前闭合又覆盖 horizon 的不可能 candle
 
 #### Scenario: 固定 horizon 缺少合格 close
 - **WHEN** anchor_delivered_at+h 到允许迟到范围内没有 complete evaluation close

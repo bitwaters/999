@@ -186,7 +186,7 @@ export function evaluateHorizon(input: {
       candle.isClosed &&
       candle.observedAt <= evaluationCutoff &&
       candle.openTime >= input.entry!.observedAt &&
-      candle.openTime + candle.intervalSeconds * 1000 <= horizonEnd,
+      candle.openTime <= close.openTime,
   );
   const partial = input.entryPartial;
   const candleIntervalMs = 30 * 1000;
@@ -210,7 +210,7 @@ export function evaluateHorizon(input: {
     const firstFullCandle = entryOnBoundary
       ? input.entry.observedAt
       : Math.ceil(input.entry.observedAt / candleIntervalMs) * candleIntervalMs;
-    for (let openTime = firstFullCandle; openTime < horizonEnd; openTime += candleIntervalMs) {
+    for (let openTime = firstFullCandle; openTime <= close.openTime; openTime += candleIntervalMs) {
       if (!latestPathCandles.some((candle) => candle.openTime === openTime))
         return {
           horizonSeconds: input.horizonSeconds,

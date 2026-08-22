@@ -206,3 +206,36 @@ test('horizon uses only fixed-time close and rejects incomplete entry-partial co
   });
   assert.equal(late.status, 'late_entry');
 });
+
+test('non-aligned horizon uses one complete path through its eligible evaluation close', () => {
+  const result = evaluateHorizon({
+    anchorDeliveredAt: 3_208,
+    horizonSeconds: 60,
+    outcomeMaxLatenessSeconds: 60,
+    entry: { observedAt: 10_043, priceUsd: '1' },
+    candles: [candle(30_000, 61_000, '1.1'), candle(60_000, 91_000, '1.2')],
+    entryPartial: { highPrice: '1.05', lowPrice: '0.95', complete: true },
+  });
+  assert.equal(result.status, 'complete');
+  if (result.status === 'complete') {
+    assert.equal(result.forwardReturn, '0.2');
+    assert.equal(result.mfe, '0.2');
+    assert.equal(result.mae, '-0.1');
+  }
+  assert.deepEqual(
+    evaluateHorizon({
+      anchorDeliveredAt: 3_208,
+      horizonSeconds: 60,
+      outcomeMaxLatenessSeconds: 60,
+      entry: { observedAt: 10_043, priceUsd: '1' },
+      candles: [candle(60_000, 91_000, '1.2')],
+      entryPartial: { highPrice: '1.05', lowPrice: '0.95', complete: true },
+    }),
+    {
+      horizonSeconds: 60,
+      evaluationCutoff: 123_208,
+      status: 'incomplete',
+      reason: 'path:missing_complete_coverage',
+    },
+  );
+});

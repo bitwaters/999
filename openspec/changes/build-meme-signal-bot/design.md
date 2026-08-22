@@ -104,7 +104,7 @@ ENTRY 在创建时固化 expires_at 和已渲染 payload；每次发送前只利
 
 REST 30 秒 OHLCV 从 anchor_delivered_at 立即开始，按 0–10m/10–30m/30–60m 分段轮询，以便 entry timeout 时也能校验 G2 零成交。冲突检查只使用锚点之后的 REST Trades，或从锚点后首个对齐边界开始的完整 OHLCV candle，禁止把含送达前成交量的重叠 candle 当成冲突。Outcome 只使用闭合 candle；同 identity 的变化追加 revision。每个 horizon 在 `anchor_delivered_at+h+max_lateness` 固化并只使用 cutoff 前最新有效修订。
 
-价格统一转换为同池、目标 token 方向的 canonical USD price：`pre_send_drift=latest_pre_send_price/confirmation_price-1`，`delivery_drift=entry_price/confirmation_price-1`，`forward_return(h)=eligible_close(h)/entry_price-1`，`MFE(h)=max(high/entry_price-1)`，`MAE(h)=min(low/entry_price-1)`。eligible close 选择目标时点至 lateness 容忍范围内最早且在 cutoff 前已观测的 complete candle close。MFE/MAE 区间从 entry observed_at 到 anchor_delivered_at+h；entry 所在的首个非对齐区间只使用 entry 之后 G2 构造的 partial candle。
+价格统一转换为同池、目标 token 方向的 canonical USD price：`pre_send_drift=latest_pre_send_price/confirmation_price-1`，`delivery_drift=entry_price/confirmation_price-1`，`forward_return(h)=eligible_close(h)/entry_price-1`，`MFE(h)=max(high/entry_price-1)`，`MAE(h)=min(low/entry_price-1)`。eligible close 选择目标时点至 lateness 容忍范围内最早且在 cutoff 前已观测的 complete candle close。MFE/MAE 使用与 forward return 相同的 eligible evaluation candle 作为终点，覆盖 entry observed_at 至该闭合 candle 的连续路径；entry 所在的首个非对齐区间只使用 entry 之后 G2 构造的 partial candle。这样非 30 秒对齐的 horizon 不会要求一根既必须完整闭合又必须在名义终点前结束的不可能 candle，路径终点最多只延伸到同一 eligible close。
 
 整体 `execution_status` 和逐 horizon `evaluation_status` 分开保存。完整 G2 且 REST 不冲突的零成交是 not_executable；entry 晚于 horizon 是 late_entry；只有数据缺失/冲突才是 incomplete。收益分布只基于 executable+complete，但报告必须并列显示全部分母。
 

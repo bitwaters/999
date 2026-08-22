@@ -204,6 +204,25 @@ test('burn projection defers new scans while confirmation retains service', asyn
   await scheduler.stop(0);
 });
 
+test('shadow observes burn projection without deferring candidate work', async () => {
+  const now = Date.UTC(2026, 7, 20);
+  const scheduler = new CoinGeckoRestScheduler(structuredClone(baseConfig), () => now, false);
+  scheduler.setProviderCreditState(500_000, 100_000, now - 86_400_000);
+  scheduler.setProviderCreditState(500_000, 200_000, now);
+  const stats = scheduler.stats();
+  assert.equal(stats.creditDeferred, false);
+  assert.ok(stats.projectedExhaustionAt !== undefined);
+  const candidate = scheduler.enqueue({
+    key: 'shadow-candidate',
+    kind: 'candidate_batch',
+    requestType: 'batch',
+    createdAt: now,
+    run: async () => 'candidate',
+  });
+  assert.equal(await candidate, 'candidate');
+  await scheduler.stop(0);
+});
+
 test('backlog overload rejects new scans before protected work', async () => {
   const now = Date.UTC(2026, 7, 20);
   const config = structuredClone(baseConfig);

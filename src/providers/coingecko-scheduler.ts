@@ -121,6 +121,7 @@ export class CoinGeckoRestScheduler {
   public constructor(
     private readonly config: BotConfig['providers']['coingecko'],
     private readonly now: () => number = Date.now,
+    private readonly enforceCreditDefer = true,
   ) {
     this.batchConcurrency = config.scheduler.batch_concurrency;
     this.tradeConcurrency = config.scheduler.finalist_trades_concurrency;
@@ -195,7 +196,11 @@ export class CoinGeckoRestScheduler {
     if (!this.accepting) return Promise.reject(new Error('scheduler:stopping'));
     const existing = this.pendingByKey.get(work.key);
     if (existing) return existing as Promise<T>;
-    if (this.creditStatus(this.now()).deferred && isCreditDeferredWork(work.kind)) {
+    if (
+      this.enforceCreditDefer &&
+      this.creditStatus(this.now()).deferred &&
+      isCreditDeferredWork(work.kind)
+    ) {
       this.rejected += 1;
       return Promise.reject(new Error('scheduler:credit_deferred'));
     }
@@ -246,7 +251,7 @@ export class CoinGeckoRestScheduler {
       effectiveRpm: this.effectiveRpm(),
       batchConcurrency: this.batchConcurrency,
       tradeConcurrency: this.tradeConcurrency,
-      creditDeferred: credit.deferred,
+      creditDeferred: this.enforceCreditDefer && credit.deferred,
       ...(credit.remaining === undefined ? {} : { remainingCredits: credit.remaining }),
       ...(credit.burnPerHour === undefined ? {} : { burnCreditsPerHour: credit.burnPerHour }),
       ...(credit.projectedExhaustionAt === undefined
@@ -337,7 +342,7 @@ export class CoinGeckoRestScheduler {
   }
 
   private hasCreditCapacity(kind: CoinGeckoWorkKind, now: number): boolean {
-    if (!this.creditStatus(now).deferred) return true;
+    if (!this.enforceCreditDefer || !this.creditStatus(now).deferred) return true;
     return kind !== 'candidate_batch' && kind !== 'recheck';
   }
 

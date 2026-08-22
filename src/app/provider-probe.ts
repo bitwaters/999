@@ -802,7 +802,11 @@ export class ProviderProbe {
   private readonly trackers: Record<'sol' | 'bsc', CandidateCycleTracker>;
 
   public constructor(private readonly options: ProviderProbeOptions) {
-    this.coinGeckoScheduler = new CoinGeckoRestScheduler(options.config.providers.coingecko);
+    this.coinGeckoScheduler = new CoinGeckoRestScheduler(
+      options.config.providers.coingecko,
+      Date.now,
+      options.config.global.run_mode === 'production',
+    );
     this.finalistReservations = new FinalistReservationBook(
       options.config.providers.coingecko.g2.max_subscriptions_per_socket,
     );

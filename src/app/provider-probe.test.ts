@@ -22,6 +22,7 @@ import {
   outcomeEvaluationPollRequired,
   outcomeEntryCoverageIsComplete,
   planExistingG2Capacity,
+  candidateRediscoveryUpdatedAt,
   readOutcomeEntryCoverage,
   readPersistedOutcomePool,
   readRuleConfigVersion,
@@ -445,6 +446,8 @@ test('candidate rediscovery keeps anchor history immutable and requeues old-conf
     }),
     { preserveHistorical: false, status: 'scouting', funnelStatus: 'safety_checked' },
   );
+  assert.equal(candidateRediscoveryUpdatedAt(1_000, 2_000, 'armed'), 1_000);
+  assert.equal(candidateRediscoveryUpdatedAt(1_000, 2_000, 'scouting'), 2_000);
 });
 
 test('G2 capacity shrink preserves pending anchors and requeues Armed candidates', () => {

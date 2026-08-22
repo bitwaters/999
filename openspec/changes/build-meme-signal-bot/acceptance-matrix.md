@@ -26,6 +26,7 @@
 - BSC 低索引率根因与修复：线上 Bot 的 SOL/BSC 主发现源是 `trending 1m/5m`，另加 `hot-searches 1m`；持续采样器为观察 newborn 覆盖额外采集了 `market trenches --type new_creation`，因此审计中的 `trenches` 是辅助采样来源，不是线上 1m/5m 主源。服务器只读检查确认旧调度在 `continuous-sampler.mjs:441` 对所有来源共用候选队列，先按最近出现时间截取前 1000 个，再判断重试时间，BSC 前 1000 个几乎被 Trenches 占满，导致大量主源未被查询；这不能归因于 CoinGecko 未收录。`11f59d1` 已在本地 review、102 个测试和 Docker Compose 构建后部署：每链主源优先、辅助源只填充余额，先筛到期再限额，保存真实首次发现/最近发现/下一次重试时间，按 `not_attempted` 等原因拆分并输出 5/15/30/60/120 分钟成熟曲线。正式信号仍保持 CoinGecko 池身份与新鲜 Level 1 fail-closed，覆盖率只作为调度/成熟度审计指标，不作为应用健康硬门槛；sampler 卡顿原因按用户要求暂不展开。
 
 - Outcome 产品正确性复核：服务器真实 BSC quote-target 样本显示 G2 `to=0.003248`、`toq=17315.608…`、`vo=14.9717 USD`，旧 parser 错算出 entry `5,331,160 USD` 和约 63.7 亿倍 delivery drift，并把 token 数量当作 USD Conviction；同一池 OHLCV 约为 `0.00086 USD`。官方合同及真实 SOL/BSC base/quote 抽样共同确认 canonical 公式为 `vo / 目标 token amount`。本地已增加 G2 parser/coverage v2 隔离旧派生事实、原 config snapshot Outcome、horizon 定点补采与 60 秒 lateness；旧 Signal/Outcome 保留审计但全部退出产品放行分母，新 cohort 未达门槛前继续 Shadow。
+- Armed 刷新时钟复核：cohort 62 中同一候选在 120 秒 lease 内四个 30 秒窗口均出现 `entry_quality:missing_price_baseline`，对应 `armed_batch` 直到 lease 结束后才完成。根因是供应商重复 discovery 更新了候选兼作 Level 1 due clock 的 `updated_at`。本地最小修复仅在同配置 Armed 重发现时保留原工作时钟；旧配置仍回到 scouting 并重置时钟，历史/锚点仍保持不可变。该发现使 cohort 62 不能承担最终工程或产品放行，必须经 main/deploy.sh 部署新 cohort 后验证首个 Armed 刷新不再被重发现延期。
 
 ## 外部验收保留项
 

@@ -383,6 +383,14 @@ export function candidateRediscoveryState(input: {
   };
 }
 
+export function candidateRediscoveryUpdatedAt(
+  currentUpdatedAt: number,
+  rediscoveredAt: number,
+  status: string,
+): number {
+  return status === 'armed' ? currentUpdatedAt : rediscoveredAt;
+}
+
 export function planExistingG2Capacity<T extends { row: { status: string; chain: 'sol' | 'bsc' } }>(
   rows: T[],
   capacity: number,
@@ -1243,11 +1251,17 @@ export class ProviderProbe {
       );
       const existing = this.options.database
         .prepare(
-          `SELECT id, status, funnel_status, config_version_id FROM candidates
+          `SELECT id, status, funnel_status, config_version_id, updated_at FROM candidates
            WHERE chain = ? AND token_address = ? AND cycle_started_at = ?`,
         )
         .get(cycle.chain, cycle.tokenAddress, cycle.cycleStartedAt) as
-        | { id: number; status: string; funnel_status: string; config_version_id: number }
+        | {
+            id: number;
+            status: string;
+            funnel_status: string;
+            config_version_id: number;
+            updated_at: number;
+          }
         | undefined;
       boundedWrite(this.options.database, this.options.writeBudget, (context) => {
         if (existing === undefined) {
@@ -1300,7 +1314,7 @@ export class ProviderProbe {
                 JSON.stringify(safety),
                 this.options.configVersionId,
                 rediscovery.funnelStatus,
-                Date.now(),
+                candidateRediscoveryUpdatedAt(existing.updated_at, Date.now(), rediscovery.status),
                 existing.id,
               );
             context.addRows(info.changes);

@@ -118,7 +118,12 @@ for (const event of runtimeRows) {
     for (const value of candidates) {
       const candidate = record(value);
       const key = candidateKey(event.chain, candidate);
-      if (key && /429|credit|rate/u.test(reason)) state.supplierDeferred.add(key);
+      if (key && /429|credit|rate/u.test(reason)) {
+        state.supplierDeferred.add(key);
+        const deferredAt = state.supplierDeferralsByKey.get(key) ?? [];
+        deferredAt.push(eventTime);
+        state.supplierDeferralsByKey.set(key, deferredAt);
+      }
     }
   }
   if (decision === 'complete') {
@@ -248,7 +253,11 @@ for (const chain of ['sol', 'bsc']) {
   const state = chains[chain];
   const totalRateLimited429 = state.rateLimited429 + globalRateLimited429;
   const cleanBatchLatencies = [...state.batchCandidates.entries()]
-    .filter(([key]) => !state.supplierDeferred.has(key))
+    .filter(([key, value]) =>
+      (state.supplierDeferralsByKey.get(key) ?? []).every(
+        (deferredAt) => deferredAt < value.dueAt || deferredAt > value.completedAt,
+      ),
+    )
     .map(([, value]) => value.completedAt - value.dueAt);
   const finalistLatencies = [...state.finalists.values()].map(
     (value) => value.armedAt - value.reservationAt,
@@ -317,6 +326,7 @@ function createChainState() {
     batchCandidates: new Map(),
     batchAttempts: 0,
     supplierDeferred: new Set(),
+    supplierDeferralsByKey: new Map(),
     activeReservations: new Map(),
     finalists: new Map(),
     batchCalls: 0,

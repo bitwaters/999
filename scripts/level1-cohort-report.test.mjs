@@ -76,6 +76,63 @@ test('cohort report reconstructs batch and reservation clocks from persisted evi
         }),
       ),
     );
+    insertEvent.run(
+      'runtime',
+      'scheduler.decision',
+      'sol',
+      null,
+      null,
+      1_200,
+      Buffer.from(
+        JSON.stringify({
+          decision: 'defer',
+          reason: 'scheduler:credit_deferred',
+          priority: 'candidate_batch',
+          eventTime: 1_200,
+          evidenceCutoffAt: 1_200,
+          configVersionId: '1',
+          candidates: [candidates[2]],
+        }),
+      ),
+    );
+    insertEvent.run(
+      'runtime',
+      'scheduler.decision',
+      'sol',
+      null,
+      null,
+      1_400,
+      Buffer.from(
+        JSON.stringify({
+          decision: 'defer',
+          reason: 'scheduler:credit_deferred',
+          priority: 'candidate_batch',
+          eventTime: 1_400,
+          evidenceCutoffAt: 1_400,
+          configVersionId: '1',
+          candidates: [candidates[1]],
+        }),
+      ),
+    );
+    insertEvent.run(
+      'runtime',
+      'scheduler.decision',
+      'sol',
+      null,
+      null,
+      1_550,
+      Buffer.from(
+        JSON.stringify({
+          decision: 'defer',
+          reason: 'scheduler:credit_deferred',
+          priority: 'candidate_batch',
+          eventTime: 1_550,
+          evidenceCutoffAt: 1_550,
+          configVersionId: '1',
+          candidates: [candidates[0]],
+        }),
+      ),
+    );
     for (const [decision, at] of [
       ['reservation_acquired', 1_600],
       ['armed', 1_900],
@@ -148,8 +205,10 @@ test('cohort report reconstructs batch and reservation clocks from persisted evi
     assert.equal(result.status, 0, result.stderr);
     const report = JSON.parse(result.stdout);
     assert.equal(report.chains.sol.valid_batch_candidates, 5);
+    assert.equal(report.chains.sol.clean_batch_candidates, 4);
+    assert.equal(report.chains.sol.supplier_deferred_candidates, 3);
     assert.deepEqual(report.chains.sol.level1_latency, {
-      samples: 5,
+      samples: 4,
       p50_ms: 250,
       p95_ms: 250,
       max_ms: 250,

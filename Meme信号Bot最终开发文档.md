@@ -277,6 +277,7 @@ CoinGecko 交易计数为 number，但价格、成交额、reserve、balance 等
 - 达到 credits/burn rate 时未订阅候选不能确认；
 - 拒绝、Candidate 过期或锚点 ENTRY 投递过期后立即退订；
 - confirmed-pending-anchor 期间保持 G2；只有 Outcome 锚点目的地成功送达才开始等待 entry。找到 entry 后 G2 必须保留到 entry 之后的下一个对齐 30s 边界，完成 entry-partial 后退订；若一直没有合格 entry，则保留到配置化 entry timeout 后标记 incomplete 并退订。非锚点投递不触发 entry 或退订。
+- 普通 Armed 使用统一配置的短租约，初始 120 秒；仅当同链存在合格等待者时，到期候选才退回既有 Level 1 等待队列，按等待年龄重新竞争有限 G2 槽位。租约不得作用于 confirmed-pending-anchor，且 live/replay 必须使用同一值；不得为凑样本扩大订阅并发或新增轮换服务。
 
 G2 ingest 只使用一个配置化有界队列。WebSocket callback 执行时立即用本机单调/墙钟组合记录 `observed_at`，然后只校验包大小并入队；raw 压缩、Schema 解析和 SQLite 批量写入在 callback 之外执行，不得用后续处理时间覆盖 `observed_at`。因为 Node 事件循环阻塞会推迟 callback，运行时必须持续测量 event-loop lag；超过配置门槛所覆盖的 G2 窗口标记 timing incomplete，不能确认或投递。所有 `better-sqlite3` 写事务必须有行数/耗时上界并批量执行。队列达到高水位时先退订最低优先 Armed 候选；若仍达到硬上限，受影响的所有订阅窗口立即标记 incomplete，包括 confirmed-pending-anchor；它们不得再确认或投递 ENTRY，并必须告警。禁止静默丢弃或因事件循环阻塞延迟 G2 后继续确认或投递。
 

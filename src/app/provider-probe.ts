@@ -331,6 +331,17 @@ export function g2OccupiedIdentities(
   return occupied;
 }
 
+export function g2ArmedLeaseState(
+  status: string,
+  armedSince: number | undefined,
+  now: number,
+  leaseSeconds: number,
+): 'not_armed' | 'start' | 'active' | 'elapsed' {
+  if (status !== 'armed') return 'not_armed';
+  if (armedSince === undefined) return 'start';
+  return now - armedSince >= leaseSeconds * 1000 ? 'elapsed' : 'active';
+}
+
 export function candidateRediscoveryState(input: {
   status: string;
   funnelStatus: string;
@@ -711,6 +722,7 @@ export class ProviderProbe {
   }>();
   private readonly finalistReservations: FinalistReservationBook;
   private readonly finalistWaitingSince = new Map<string, number>();
+  private readonly g2ArmedSince = new Map<string, number>();
   private readonly g2Queue: G2IngestQueue<PendingG2>;
   private readonly g2Deduper = new TradeDeduper();
   private g2Client: CoinGeckoG2Client | undefined;
@@ -801,6 +813,7 @@ export class ProviderProbe {
     await this.g2DrainInFlight;
     this.finalistReservations.clearReservations();
     this.finalistWaitingSince.clear();
+    this.g2ArmedSince.clear();
     await this.g2Client?.stop();
     await Promise.allSettled([...this.confirmationRefreshes]);
   }
@@ -1320,7 +1333,9 @@ export class ProviderProbe {
       )
       .get(identity.chain, identity.tokenAddress, identity.poolAddress);
     if (remaining) return;
-    this.g2Client?.unset(`${identity.chain}:${identity.poolAddress}:${identity.tokenAddress}`);
+    const identityKey = `${identity.chain}:${identity.poolAddress}:${identity.tokenAddress}`;
+    this.g2Client?.unset(identityKey);
+    this.g2ArmedSince.delete(identityKey);
   }
 
   private async scheduleCoinGeckoRequest<T>(work: CoinGeckoWork<T>): Promise<T> {
@@ -1776,25 +1791,43 @@ export class ProviderProbe {
       if (!canArmG2Candidate(row.status, row.funnel_status, attention.status)) continue;
       eligible.push({ row, pool, screening });
     }
-    if (eligible.length === 0 && existingArmed.length === 0) {
+    const leaseNow = Date.now();
+    const waitingChains = new Set(eligible.map(({ row }) => row.chain));
+    const leaseElapsed = existingArmed.filter(({ row, pool }) => {
+      const state = g2ArmedLeaseState(
+        row.status,
+        this.g2ArmedSince.get(pool.identityKey),
+        leaseNow,
+        this.options.config.providers.coingecko.g2.armed_lease_seconds,
+      );
+      if (state === 'start') this.g2ArmedSince.set(pool.identityKey, leaseNow);
+      return state === 'elapsed' && waitingChains.has(row.chain);
+    });
+    if (leaseElapsed.length > 0) this.demoteArmedForG2Capacity(leaseElapsed, 'g2:lease_elapsed');
+    const retainedExisting = existingArmed.filter((item) => !leaseElapsed.includes(item));
+    if (eligible.length === 0 && retainedExisting.length === 0) {
       if (this.g2Client) {
         const active = this.g2Client.active();
-        for (const identityKey of armedSubscriptionsToRelease(active, new Set()))
+        for (const identityKey of armedSubscriptionsToRelease(active, new Set())) {
           this.g2Client.unset(identityKey);
+          this.g2ArmedSince.delete(identityKey);
+        }
         this.finalistReservations.reconcileOccupied(g2OccupiedIdentities(active, new Set()));
       }
       return;
     }
     const g2Client = await this.ensureG2Client(key);
     const capacityPlan = planExistingG2Capacity(
-      existingArmed,
+      retainedExisting,
       this.options.config.providers.coingecko.g2.max_subscriptions_per_socket,
     );
     if (capacityPlan.demoted.length > 0) this.demoteArmedForG2Capacity(capacityPlan.demoted);
     const desired = new Set(capacityPlan.retained.map(({ pool }) => pool.identityKey));
     const active = g2Client.active();
-    for (const identityKey of armedSubscriptionsToRelease(active, desired))
+    for (const identityKey of armedSubscriptionsToRelease(active, desired)) {
       g2Client.unset(identityKey);
+      this.g2ArmedSince.delete(identityKey);
+    }
     this.finalistReservations.reconcileOccupied(g2OccupiedIdentities(active, desired));
     for (const { row, pool } of capacityPlan.retained) {
       const state = row.status === 'armed' ? 'armed' : 'confirmed-pending-anchor';
@@ -2150,6 +2183,7 @@ export class ProviderProbe {
       poolAddress: row.pool_address,
       cycleStartedAt: row.cycle_started_at,
     });
+    this.g2ArmedSince.set(pool.identityKey, Date.now());
     this.finalistWaitingSince.delete(reservationKey);
     this.options.logger('info', 'finalist_armed', {
       chain: row.chain,
@@ -2160,6 +2194,7 @@ export class ProviderProbe {
 
   private demoteArmedForG2Capacity(
     items: Array<{ row: ArmCandidateRow; pool: CanonicalPool }>,
+    reason = 'g2:capacity_rebalance',
   ): void {
     const at = Date.now();
     boundedWrite(this.options.database, this.options.writeBudget, (context) => {
@@ -2175,10 +2210,11 @@ export class ProviderProbe {
     });
     for (const { row, pool } of items) {
       this.g2Client?.unset(pool.identityKey);
+      this.g2ArmedSince.delete(pool.identityKey);
       this.finalistReservations.releaseOccupied(pool.identityKey);
       this.recordSchedulerDecision({
         decision: 'armed_reverted',
-        reason: 'g2:capacity_rebalance',
+        reason,
         priority: 'candidate_batch',
         chain: row.chain,
         tokenAddress: row.token_address,
@@ -2678,6 +2714,7 @@ export class ProviderProbe {
     if (signal?.pool_address) {
       const identityKey = `${signal.chain}:${signal.pool_address}:${signal.token_address}`;
       this.g2Client?.unset(identityKey);
+      this.g2ArmedSince.delete(identityKey);
       this.finalistReservations.releaseOccupied(identityKey);
     }
   }
@@ -2925,7 +2962,10 @@ export class ProviderProbe {
     })
       .then((result) => {
         if (result.status === 'blocked') {
-          if (result.reason.startsWith('safety:')) this.g2Client?.unset(pool.identityKey);
+          if (result.reason.startsWith('safety:')) {
+            this.g2Client?.unset(pool.identityKey);
+            this.g2ArmedSince.delete(pool.identityKey);
+          }
           this.options.logger('info', 'confirmation_evidence_refresh_blocked', {
             chain: trade.chain,
             pool_address: trade.poolAddress,

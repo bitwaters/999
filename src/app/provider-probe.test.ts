@@ -9,6 +9,7 @@ import {
   evaluateCandidateAttention,
   expireStaleCandidateRows,
   g2ProbeState,
+  g2ArmedLeaseState,
   g2OccupiedIdentities,
   groupLevel1RowsByWorkKind,
   latestLevel1ObservedAt,
@@ -302,6 +303,13 @@ test('G2 reconciliation releases obsolete Armed pools but preserves pending anch
     'bsc:keep:token',
     'sol:anchor:token',
   ]);
+});
+
+test('ordinary Armed subscriptions rotate after the configured lease but anchors do not', () => {
+  assert.equal(g2ArmedLeaseState('armed', undefined, 120_000, 120), 'start');
+  assert.equal(g2ArmedLeaseState('armed', 1_000, 120_999, 120), 'active');
+  assert.equal(g2ArmedLeaseState('armed', 1_000, 121_000, 120), 'elapsed');
+  assert.equal(g2ArmedLeaseState('confirmed-pending-anchor', 1_000, 999_000, 120), 'not_armed');
 });
 
 test('candidate rediscovery keeps anchor history immutable and requeues old-config Armed state', () => {

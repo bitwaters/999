@@ -47,6 +47,35 @@ export type SimulatedReplayResult = {
 
 type ReplayAdmission = { status: 'armed'; armedAt: number } | { status: 'blocked'; reason: string };
 
+export function selectReplayScreeningAfterWait<T extends { eligibleAt: number }>(
+  screenings: readonly T[],
+  initialEligibleAt: number,
+  slotAvailableAt: number,
+): T | undefined {
+  return slotAvailableAt === initialEligibleAt
+    ? screenings[0]
+    : screenings.find((screening) => screening.eligibleAt >= slotAvailableAt);
+}
+
+export function replaySlotAvailableAt(
+  occupied: readonly { chain: 'sol' | 'bsc'; until: number }[],
+  chain: 'sol' | 'bsc',
+  eligibleAt: number,
+  totalCapacity: number,
+): number {
+  const chainCapacity = Math.max(1, Math.floor(totalCapacity / 2));
+  let availableAt = eligibleAt;
+  while (true) {
+    const active = occupied.filter((slot) => slot.until > availableAt);
+    const chainActive = active.filter((slot) => slot.chain === chain);
+    if (active.length < totalCapacity && chainActive.length < chainCapacity) return availableAt;
+    const blockers = active.filter(
+      (slot) => active.length >= totalCapacity || slot.chain === chain,
+    );
+    availableAt = Math.min(...blockers.map((slot) => slot.until));
+  }
+}
+
 export function simulateReplay(input: {
   config: BotConfig;
   configVersionId: number;
@@ -295,6 +324,10 @@ function buildReplayAdmissions(
     cycle: CandidateCycle;
     pool: CanonicalPool;
     screening: ReturnType<typeof parseLevel1ScreeningSnapshot> & { status: 'complete' };
+    screenings: Array<{
+      screening: ReturnType<typeof parseLevel1ScreeningSnapshot> & { status: 'complete' };
+      eligibleAt: number;
+    }>;
     eligibleAt: number;
     expiresAt: number;
   }> = [];
@@ -316,12 +349,10 @@ function buildReplayAdmissions(
       continue;
     }
     const network = cycle.chain === 'sol' ? 'solana' : 'bsc';
-    let selected:
-      | {
-          screening: ReturnType<typeof parseLevel1ScreeningSnapshot> & { status: 'complete' };
-          eligibleAt: number;
-        }
-      | undefined;
+    const screenings: Array<{
+      screening: ReturnType<typeof parseLevel1ScreeningSnapshot> & { status: 'complete' };
+      eligibleAt: number;
+    }> = [];
     for (const event of relevant.filter((item) => item.kind === 'level1').sort(byObservedAt)) {
       const safety = safetyAt({ ...input, cycle }, relevant, event.observedAt);
       if (safety?.status !== 'pass') continue;
@@ -347,14 +378,14 @@ function buildReplayAdmissions(
         event.observedAt,
       );
       if (screening.status !== 'complete') continue;
-      selected = { screening, eligibleAt: event.observedAt };
-      break;
+      screenings.push({ screening, eligibleAt: event.observedAt });
     }
+    const selected = screenings[0];
     if (!selected) {
       result.set(key, { status: 'blocked', reason: 'adaptive:structural_or_attention' });
       continue;
     }
-    eligible.push({ key, cycle, pool: resolved.pool, ...selected, expiresAt });
+    eligible.push({ key, cycle, pool: resolved.pool, screenings, ...selected, expiresAt });
   }
 
   eligible.sort((left, right) => {
@@ -370,12 +401,26 @@ function buildReplayAdmissions(
     return left.key.localeCompare(right.key);
   });
 
-  const occupiedUntil: number[] = [];
+  const occupied: Array<{ chain: 'sol' | 'bsc'; until: number }> = [];
   const capacity = input.config.providers.coingecko.g2.max_subscriptions_per_socket;
+  const armedLeaseMs = input.config.providers.coingecko.g2.armed_lease_seconds * 1000;
   for (const item of eligible) {
-    for (let index = occupiedUntil.length - 1; index >= 0; index -= 1)
-      if (occupiedUntil[index]! <= item.eligibleAt) occupiedUntil.splice(index, 1);
-    if (occupiedUntil.length >= capacity) {
+    let admissionAt = replaySlotAvailableAt(occupied, item.pool.chain, item.eligibleAt, capacity);
+    for (let index = occupied.length - 1; index >= 0; index -= 1)
+      if (occupied[index]!.until <= admissionAt) occupied.splice(index, 1);
+    const admissionScreening = selectReplayScreeningAfterWait(
+      item.screenings,
+      item.eligibleAt,
+      admissionAt,
+    );
+    if (!admissionScreening) {
+      result.set(item.key, { status: 'blocked', reason: 'adaptive:screening_refresh_unavailable' });
+      continue;
+    }
+    admissionAt = admissionScreening.eligibleAt;
+    for (let index = occupied.length - 1; index >= 0; index -= 1)
+      if (occupied[index]!.until <= admissionAt) occupied.splice(index, 1);
+    if (admissionAt > Math.min(item.expiresAt, input.dataEndAt, input.dataCutoffAt)) {
       result.set(item.key, { status: 'blocked', reason: 'adaptive:finalist_capacity' });
       continue;
     }
@@ -383,7 +428,7 @@ function buildReplayAdmissions(
       .filter(
         (event) =>
           event.kind === 'trades' &&
-          event.observedAt >= item.eligibleAt &&
+          event.observedAt >= admissionAt &&
           event.observedAt <= Math.min(item.expiresAt, input.dataEndAt, input.dataCutoffAt) &&
           event.poolAddress !== undefined &&
           event.tokenAddress !== undefined &&
@@ -396,7 +441,7 @@ function buildReplayAdmissions(
       result.set(item.key, { status: 'blocked', reason: 'adaptive:finalist_trade_unavailable' });
       continue;
     }
-    const promoted = promoteLevel1ScreeningSnapshot(item.screening.snapshot, {
+    const promoted = promoteLevel1ScreeningSnapshot(admissionScreening.screening.snapshot, {
       source: 'rest',
       chain: item.pool.chain,
       poolAddress: item.pool.poolAddress,
@@ -408,7 +453,10 @@ function buildReplayAdmissions(
       result.set(item.key, { status: 'blocked', reason: 'adaptive:finalist_trade_invalid' });
       continue;
     }
-    occupiedUntil.push(item.expiresAt);
+    occupied.push({
+      chain: item.pool.chain,
+      until: Math.min(item.expiresAt, trade.observedAt + armedLeaseMs),
+    });
     result.set(item.key, { status: 'armed', armedAt: trade.observedAt });
   }
   return result;

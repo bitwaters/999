@@ -63,15 +63,23 @@ const cohort = requestedVersion
 if (!cohort) throw new Error('Requested config version does not exist');
 const cohortConfig = YAML.parse(cohort.yaml_snapshot);
 delete cohort.yaml_snapshot;
+const nextCohort = database
+  .prepare(
+    `SELECT created_at FROM rule_config_versions
+     WHERE created_at > ? ORDER BY created_at ASC LIMIT 1`,
+  )
+  .get(cohort.created_at);
+const cohortEnd = nextCohort?.created_at ?? Date.now();
+cohort.ended_at = nextCohort?.created_at ?? null;
 
 const runtimeRows = database
   .prepare(
     `SELECT chain, token_address, pool_address, observed_at, payload_encoding, payload
      FROM provider_events
      WHERE provider = 'runtime' AND capability = 'scheduler.decision'
-       AND observed_at >= ? ORDER BY observed_at, id`,
+       AND observed_at >= ? AND observed_at < ? ORDER BY observed_at, id`,
   )
-  .all(cohort.created_at)
+  .all(cohort.created_at, cohortEnd)
   .flatMap((row) => {
     try {
       const payload = record(decode(row));
@@ -153,11 +161,11 @@ const requestRows = database
   .prepare(
     `SELECT chain, capability, COUNT(*) AS calls
      FROM provider_events
-     WHERE provider = 'coingecko' AND observed_at >= ?
+     WHERE provider = 'coingecko' AND observed_at >= ? AND observed_at < ?
        AND capability IN ('pools.multi.level1', 'trades.level1')
      GROUP BY chain, capability`,
   )
-  .all(cohort.created_at);
+  .all(cohort.created_at, cohortEnd);
 for (const row of requestRows) {
   if (row.chain !== 'sol' && row.chain !== 'bsc') continue;
   if (row.capability === 'pools.multi.level1') chains[row.chain].batchCalls = Number(row.calls);
@@ -167,10 +175,11 @@ for (const row of requestRows) {
 const keyCreditSamples = database
   .prepare(
     `SELECT payload_encoding, payload FROM provider_events
-     WHERE provider = 'coingecko' AND capability = 'key' AND observed_at >= ?
+     WHERE provider = 'coingecko' AND capability = 'key'
+       AND observed_at >= ? AND observed_at < ?
      ORDER BY observed_at`,
   )
-  .all(cohort.created_at)
+  .all(cohort.created_at, cohortEnd)
   .flatMap((row) => {
     try {
       const used = Number(record(decode(row)).api_key_current_total_monthly_calls);

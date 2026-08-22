@@ -60,6 +60,7 @@ providers:
     g2:
       max_sockets: 1
       max_subscriptions_per_socket: 4
+      armed_lease_seconds: 120
       rolling_credits_per_message_upper_bound: 10
   telegram:
     bot_token_env: TELEGRAM_BOT_TOKEN

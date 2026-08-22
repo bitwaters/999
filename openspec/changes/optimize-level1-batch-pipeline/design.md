@@ -64,6 +64,8 @@ GMGN 发现只更新 Candidate 并把合格工作放入内存调度器，不再�
 
 reservation 不预先创建 G2 socket，也不新增持久化表。关键状态转换写内部 runtime event 供审计和 replay；进程重启一律视内存预留失效，再根据 active candidates 和实际 G2 占用重建，从而避免幽灵容量。
 
+普通 Armed 使用集中配置的短租约，初始 120 秒，至少覆盖完整 30 秒确认窗口；只有同链存在合格等待者时，租约到期才复用现有 demote、Level 1 等待年龄和 reservation 流程进行轮换，没有等待者则继续观察，不增加表或第二套队列。`confirmed-pending-anchor` 为信号与 Outcome 保留，不参与普通租约轮换。replay 使用同一租约，避免有限容量被少数持续上榜代币永久垄断，也不通过扩大 G2 并发突破真实 credits 预算。
+
 ### 8. 截止时间调度同时保护确认与 Outcome
 
 调度器分别为确认和必要 Outcome 保留请求/RPM 份额及月度 credit bucket。正常情况下按确认刷新、新候选批量、Armed 批量、动态复查、非紧急 Outcome 分配非保留容量；一旦工作到达 `latest_start_at = final_deadline - timeout_and_retry_budget`，即晋升最高优先级并使用对应保留资源。发生过载时先停止动态复查和新候选接纳，不允许已知必要 Outcome 因永久排在队尾而越过最终 cutoff。

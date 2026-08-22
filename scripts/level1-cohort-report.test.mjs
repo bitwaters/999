@@ -37,6 +37,14 @@ test('cohort report reconstructs batch and reservation clocks from persisted evi
           1000)`,
       )
       .run();
+    database
+      .prepare(
+        `INSERT INTO rule_config_versions VALUES
+         (2, 'next-hash', 'next-commit', 'shadow',
+          'providers:\n  coingecko:\n    scheduler:\n      dynamic_recheck_seconds: 60\nchains:\n  sol:\n    discovery:\n      candidate_ttl_seconds: 900\n    level1:\n      refresh_interval_seconds: 45\n  bsc:\n    discovery:\n      candidate_ttl_seconds: 900\n    level1:\n      refresh_interval_seconds: 45',
+          2000)`,
+      )
+      .run();
     const insertEvent = database.prepare(
       `INSERT INTO provider_events
        (provider, capability, chain, token_address, pool_address, observed_at,
@@ -111,6 +119,16 @@ test('cohort report reconstructs batch and reservation clocks from persisted evi
         1_800 + used,
         Buffer.from(JSON.stringify({ api_key_current_total_monthly_calls: used })),
       );
+    insertEvent.run('coingecko', 'pools.multi.level1', 'sol', null, null, 2_100, Buffer.from('{}'));
+    insertEvent.run(
+      'coingecko',
+      'key',
+      null,
+      null,
+      null,
+      2_200,
+      Buffer.from(JSON.stringify({ api_key_current_total_monthly_calls: 999 })),
+    );
     const now = Date.now();
     database
       .prepare(
@@ -124,7 +142,7 @@ test('cohort report reconstructs batch and reservation clocks from persisted evi
 
     const result = spawnSync(process.execPath, ['scripts/level1-cohort-report.mjs'], {
       cwd: path.resolve(import.meta.dirname, '..'),
-      env: { ...process.env, BOT_DATABASE_PATH: databasePath },
+      env: { ...process.env, BOT_DATABASE_PATH: databasePath, CONFIG_VERSION_ID: '1' },
       encoding: 'utf8',
     });
     assert.equal(result.status, 0, result.stderr);
@@ -143,10 +161,12 @@ test('cohort report reconstructs batch and reservation clocks from persisted evi
       max_ms: 300,
     });
     assert.equal(report.chains.sol.rest_calls.reduction_percent, 66.67);
+    assert.equal(report.chains.sol.rest_calls.batch, 1);
     assert.equal(report.chains.sol.backlog.due, 1);
     assert.ok(report.chains.sol.backlog.oldest_wait_ms >= 59_000);
     assert.ok(report.chains.sol.backlog.oldest_wait_ms < 65_000);
     assert.equal(report.credits.used_delta, 4);
+    assert.equal(report.cohort.ended_at, 2_000);
     assert.equal(report.recommendation, 'hold_shadow');
   } finally {
     await rm(directory, { recursive: true, force: true });

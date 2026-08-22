@@ -3,7 +3,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseConfigText } from '../config/load.js';
 import type { ReplayEvidence } from './timeline.js';
-import { simulateReplay } from './simulator.js';
+import {
+  replaySlotAvailableAt,
+  selectReplayScreeningAfterWait,
+  simulateReplay,
+} from './simulator.js';
 
 const base = parseConfigText(
   readFileSync(new URL('../../config/bot.yaml', import.meta.url), 'utf8'),
@@ -307,4 +311,25 @@ test('adaptive admission replay is deterministic for the same raw timeline and c
     evidence: evidence(),
   };
   assert.deepEqual(simulateReplay(input), simulateReplay(input));
+});
+
+test('adaptive replay requires refreshed screening after waiting for an Armed lease', () => {
+  const screenings = [{ eligibleAt: 1_000 }, { eligibleAt: 130_000 }];
+  assert.equal(selectReplayScreeningAfterWait(screenings, 1_000, 1_000)?.eligibleAt, 1_000);
+  assert.equal(selectReplayScreeningAfterWait(screenings, 1_000, 121_000)?.eligibleAt, 130_000);
+  assert.equal(selectReplayScreeningAfterWait(screenings.slice(0, 1), 1_000, 121_000), undefined);
+});
+
+test('adaptive replay enforces both total and per-chain G2 capacity', () => {
+  const occupied = [
+    { chain: 'sol' as const, until: 120_000 },
+    { chain: 'sol' as const, until: 130_000 },
+    { chain: 'bsc' as const, until: 140_000 },
+  ];
+  assert.equal(replaySlotAvailableAt(occupied, 'bsc', 10_000, 4), 10_000);
+  assert.equal(replaySlotAvailableAt(occupied, 'sol', 10_000, 4), 120_000);
+  assert.equal(
+    replaySlotAvailableAt([...occupied, { chain: 'bsc', until: 150_000 }], 'bsc', 10_000, 4),
+    140_000,
+  );
 });

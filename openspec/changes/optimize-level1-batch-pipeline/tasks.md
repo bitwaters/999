@@ -24,7 +24,7 @@
 - [x] 4.1 将 GMGN 发现、Attention 便宜预筛和链安全门禁接入调度，证明安全非 pass、旧 config 或过期 Candidate 不产生 CoinGecko 调用。（普通候选同时限制 safety pass、当前 config 与分链 TTL；anchor 生命周期单独保留）
 - [x] 4.2 用批量筛选快照替代全池 `/trades` 普查；安全、Attention、Candidate freshness 与结构门槛负责资格，buyers/reserve/volume/net-buy/年龄覆盖只参与排序和有界复查，并用等待年龄提升防止新币永久饥饿。（首次动态不足不关闭 Cycle，等待超限先提升）
 - [x] 4.3 按 G2 容量与确定性优先级签发绑定 Cycle/池身份且带 TTL 的 finalist reservation；每身份只允许一个初始化 `/trades` 在途请求，临时失败有界重试，成功后先原子转换为 Armed 容量再由 Armed 发起 G2；已有 Armed/pending anchor 的确认补证与恢复不重复预留，过期/离开 Cycle/身份变化时释放并允许重新竞争。（过期转换失败会回退 DB，G2 拒绝会释放实际占用；配置切换会重排旧 Armed，但不覆写已确认/交付/完成的历史锚点）
-- [x] 4.4 Armed 周期刷新改用批量池 + 已持久化 G2，只有初始化、确认补证、冲突或明确恢复允许 REST trades；验证正常 Armed 不再每轮下载 300 笔 trades。（普通/Armed 周期批量路径已无 per-pool trades）
+- [x] 4.4 Armed 周期刷新改用批量池 + 已持久化 G2，只有初始化、确认补证、冲突或明确恢复允许 REST trades；验证正常 Armed 不再每轮下载 300 笔 trades。（普通/Armed 周期批量路径已无 per-pool trades；普通 Armed 以集中配置租约公平轮换，pending anchor 不轮换，replay 同口径）
 - [x] 4.5 将现有确认前“安全→单候选 Level 1→完整表达式”接入最高优先级，并保证原 30 秒 G2 窗口、freshness、EntryQuality 和 Telegram 路由均不放宽。（确认 pool+trades 使用 deadline 和 confirmation reserve，原表达式未改）
 - [x] 4.6 解耦发现定时器与 CoinGecko/Outcome 工作完成，保持单进程和一套运行时路径，并扩展健康状态覆盖 scheduler latency/backlog/defer/failure。（GMGN 60 秒与 CoinGecko 5 秒 due 扫描独立；CoinGecko 10 秒供应商缓存不变；状态含排队/持久化 backlog、延迟、失败、拒绝和 credits）
 

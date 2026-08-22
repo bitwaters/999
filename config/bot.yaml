@@ -35,6 +35,7 @@ providers:
       batch_concurrency: 2
       finalist_trades_concurrency: 4
       merge_delay_ms: 300
+      scan_interval_seconds: 5
       cache_ttl_seconds: 10
       dynamic_recheck_seconds: 60
       key_refresh_seconds: 60

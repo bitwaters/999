@@ -749,7 +749,7 @@ export class ProviderProbe {
     this.timer = setInterval(() => void this.runOnce(), intervalMs);
     this.coinGeckoTimer = setInterval(
       () => this.startCoinGeckoProbe(),
-      this.options.config.providers.coingecko.scheduler.cache_ttl_seconds * 1000,
+      this.options.config.providers.coingecko.scheduler.scan_interval_seconds * 1000,
     );
     void this.runOnce();
   }

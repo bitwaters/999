@@ -152,6 +152,7 @@ const providerSchema = z
             batch_concurrency: z.number().int().min(1).max(8),
             finalist_trades_concurrency: z.number().int().min(1).max(8),
             merge_delay_ms: z.number().int().min(200).max(500),
+            scan_interval_seconds: z.number().int().min(1).max(10),
             cache_ttl_seconds: z.number().int().min(1).max(30),
             dynamic_recheck_seconds: z.number().int().min(1).max(60),
             key_refresh_seconds: z.number().int().min(30).max(600),
@@ -351,6 +352,12 @@ export const configSchema = z
         code: 'custom',
         path: ['providers', 'coingecko', 'scheduler'],
         message: 'Dynamic recheck must not exceed maximum wait',
+      });
+    if (scheduler.scan_interval_seconds > scheduler.cache_ttl_seconds)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['providers', 'coingecko', 'scheduler', 'scan_interval_seconds'],
+        message: 'Scheduler scan interval must not exceed the cache TTL',
       });
     if (scheduler.initialization_retry.base_delay_ms > scheduler.initialization_retry.max_delay_ms)
       ctx.addIssue({

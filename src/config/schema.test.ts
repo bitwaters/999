@@ -18,6 +18,7 @@ test('accepts the complete Shadow configuration', () => {
   assert.equal(loaded.config.providers.coingecko.max_pools_per_batch, 50);
   assert.equal(loaded.config.providers.coingecko.scheduler.batch_concurrency, 2);
   assert.equal(loaded.config.providers.coingecko.scheduler.finalist_trades_concurrency, 4);
+  assert.equal(loaded.config.providers.coingecko.scheduler.scan_interval_seconds, 5);
   assert.match(loaded.configHash, /^[a-f0-9]{64}$/u);
 });
 
@@ -85,6 +86,9 @@ test('rejects invalid CoinGecko scheduler capacity relationships', () => {
   scheduler.backlog_high_watermark = 300;
   scheduler.cache_ttl_seconds = 46;
   assert.throws(() => parseConfigText(YAML.stringify(value)), /<=30/u);
+  scheduler.cache_ttl_seconds = 5;
+  scheduler.scan_interval_seconds = 6;
+  assert.throws(() => parseConfigText(YAML.stringify(value)), /must not exceed the cache TTL/u);
 });
 
 test('rejects unsupported GMGN signal types', () => {

@@ -38,7 +38,7 @@
 
 `50` 仅作为 `pool_addresses_per_request` 硬限制。每链到期候选先按持久化状态恢复、去重和确定性优先级排序，再按 50 切片；`max_due_pools_per_chain` 控制一次调度装入内存的工作量。溢出候选仍以 due 状态保留在 SQLite Candidate 事实源，下一轮重新扫描；backlog 与 oldest wait 必须同时统计已装载和未装载工作。
 
-同一进程维护一个 CoinGecko REST scheduler，初始批量并发 2、finalist trades 并发 4，所有任务仍通过统一 token bucket。调度级别和截止时间规则固定在代码中以保证行为一致；容量、并发、merge delay、cache TTL、复查间隔、截止时间晋升和资源保留比例集中在 `config/bot.yaml`。不允许各模块自建限流器。
+同一进程维护一个 CoinGecko REST scheduler，初始批量并发 2、finalist trades 并发 4，所有任务仍通过统一 token bucket。调度级别和截止时间规则固定在代码中以保证行为一致；容量、并发、扫描间隔、merge delay、cache TTL、复查间隔、截止时间晋升和资源保留比例集中在 `config/bot.yaml`。扫描只重查 SQLite due，供应商请求仍受 due、single-flight、cache TTL 与统一限流约束。不允许各模块自建限流器。
 
 替代方案“为每条链创建独立执行器”会使共享 RPM/credits 失真；“无限切批立即 Promise.all”会造成 429 和尾延迟抖动。
 

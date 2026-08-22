@@ -6,7 +6,7 @@
 
 ## 2. 集中配置与证据模型
 
-- [x] 2.1 在 config/bot.yaml 同一区域增加并校验批量硬上限 50、每链到期取量、批量/逐池并发、merge delay、cache TTL、动态复查/最大等待、reservation TTL/重试、deadline promotion、确认与 Outcome 保留份额和 backlog 水位；禁止在代码或其他文件复制可调值。（集中于 `providers.coingecko.scheduler`，移除 SOL/BSC 重复 merge delay；schema 交叉约束、15 项配置测试与 typecheck 通过）
+- [x] 2.1 在 config/bot.yaml 同一区域增加并校验批量硬上限 50、每链到期取量、批量/逐池并发、扫描间隔、merge delay、cache TTL、动态复查/最大等待、reservation TTL/重试、deadline promotion、确认与 Outcome 保留份额和 backlog 水位；禁止在代码或其他文件复制可调值。（集中于 `providers.coingecko.scheduler`，扫描间隔与供应商 cache TTL 独立且不得更长；移除 SOL/BSC 重复 merge delay）
 - [x] 2.2 新增不含 lastTradeAt 的批量筛选快照和 DataState，解析两链身份、m5/m15/m30 buyers/buys/sells/volume、net buy、reserve、价格、年龄、composition，以及真实返回或已有证据中的条件适用 migration；合同承诺且适用的字段缺失/冲突 fail-closed，未验证字段不得成为全池必填，非 launchpad 普通池不得因缺少 launchpad 字段失败。（新增 `level1-screening.ts` 与 CoinGecko 批量映射；普通池不要求 launchpad/migration）
 - [x] 2.3 实现链独立池稳定性判定，比较绑定池身份、base/quote、target side、REST/G2 能力和适用的 migration/graduation，移除固定 stable；证明合法 reserve/composition 变化不触发 unstable。（SOL 精确/BSC 大小写无关身份检查；明确迁移/身份/能力冲突 unstable，缺字段 incomplete，正常数值变化 stable）
 - [x] 2.4 保留完整 Level1Snapshot 的真实 lastTradeAt 要求，增加由身份匹配 REST trades/G2 提升批量快照的纯函数，并测试 observedAt 绝不冒充成交时间。（`promoteLevel1ScreeningSnapshot` 仅接受匹配 REST/G2 事件；10 项针对性测试与 typecheck 通过）
@@ -26,7 +26,7 @@
 - [x] 4.3 按 G2 容量与确定性优先级签发绑定 Cycle/池身份且带 TTL 的 finalist reservation；每身份只允许一个初始化 `/trades` 在途请求，临时失败有界重试，成功后先原子转换为 Armed 容量再由 Armed 发起 G2；已有 Armed/pending anchor 的确认补证与恢复不重复预留，过期/离开 Cycle/身份变化时释放并允许重新竞争。（过期转换失败会回退 DB，G2 拒绝会释放实际占用）
 - [x] 4.4 Armed 周期刷新改用批量池 + 已持久化 G2，只有初始化、确认补证、冲突或明确恢复允许 REST trades；验证正常 Armed 不再每轮下载 300 笔 trades。（普通/Armed 周期批量路径已无 per-pool trades）
 - [x] 4.5 将现有确认前“安全→单候选 Level 1→完整表达式”接入最高优先级，并保证原 30 秒 G2 窗口、freshness、EntryQuality 和 Telegram 路由均不放宽。（确认 pool+trades 使用 deadline 和 confirmation reserve，原表达式未改）
-- [x] 4.6 解耦发现定时器与 CoinGecko/Outcome 工作完成，保持单进程和一套运行时路径，并扩展健康状态覆盖 scheduler latency/backlog/defer/failure。（GMGN 60 秒与 CoinGecko 10 秒定时器独立；状态含排队/持久化 backlog、延迟、失败、拒绝和 credits）
+- [x] 4.6 解耦发现定时器与 CoinGecko/Outcome 工作完成，保持单进程和一套运行时路径，并扩展健康状态覆盖 scheduler latency/backlog/defer/failure。（GMGN 60 秒与 CoinGecko 5 秒 due 扫描独立；CoinGecko 10 秒供应商缓存不变；状态含排队/持久化 backlog、延迟、失败、拒绝和 credits）
 
 ## 5. 原始证据与确定性回放
 

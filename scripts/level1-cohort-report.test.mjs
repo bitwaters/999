@@ -271,6 +271,12 @@ test('cohort report reconstructs batch and reservation clocks from persisted evi
       p95_ms: 250,
       max_ms: 250,
     });
+    assert.deepEqual(report.chains.sol.supplier_deferred_level1_latency, {
+      samples: 1,
+      p50_ms: 250,
+      p95_ms: 250,
+      max_ms: 250,
+    });
     assert.deepEqual(report.chains.sol.finalist_to_g2_latency, {
       samples: 1,
       p50_ms: 300,

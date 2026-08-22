@@ -514,12 +514,15 @@ const chainReports = {};
 for (const chain of ['sol', 'bsc']) {
   const state = chains[chain];
   const totalRateLimited429 = state.rateLimited429 + globalRateLimited429;
+  const supplierDeferredDuringCompletion = (key, value) =>
+    (state.supplierDeferralsByKey.get(key) ?? []).some(
+      (deferredAt) => deferredAt >= value.dueAt && deferredAt <= value.completedAt,
+    );
   const cleanBatchLatencies = [...state.batchCandidates.entries()]
-    .filter(([key, value]) =>
-      (state.supplierDeferralsByKey.get(key) ?? []).every(
-        (deferredAt) => deferredAt < value.dueAt || deferredAt > value.completedAt,
-      ),
-    )
+    .filter(([key, value]) => !supplierDeferredDuringCompletion(key, value))
+    .map(([, value]) => value.completedAt - value.dueAt);
+  const supplierDeferredBatchLatencies = [...state.batchCandidates.entries()]
+    .filter(([key, value]) => supplierDeferredDuringCompletion(key, value))
     .map(([, value]) => value.completedAt - value.dueAt);
   const finalistLatencies = [...state.finalists.values()].map(
     (value) => value.armedAt - value.reservationAt,
@@ -543,6 +546,7 @@ for (const chain of ['sol', 'bsc']) {
     clean_batch_candidates: cleanBatchLatencies.length,
     finalist_to_g2_samples: state.finalists.size,
     level1_latency: level1Latency,
+    supplier_deferred_level1_latency: latencySummary(supplierDeferredBatchLatencies),
     finalist_to_g2_latency: finalistLatency,
     rest_calls: {
       batch: state.batchCalls,

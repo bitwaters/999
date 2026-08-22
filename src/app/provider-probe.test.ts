@@ -15,6 +15,7 @@ import {
   latestLevel1ObservedAt,
   level1ProbeState,
   level1FunnelAfterBatch,
+  unchangedLevel1WaitDedupeKey,
   level1WorkDueAt,
   nextLevel1ProbeState,
   outcomeEntryCoverageIsComplete,
@@ -176,6 +177,25 @@ test('successful Level 1 batches cadence local gaps without corrupting active li
     'confirmed-pending-anchor',
   );
   assert.equal(level1FunnelAfterBatch('delivered', 'delivered', true), 'delivered');
+});
+
+test('unchanged scheduler waits deduplicate until a batch can run again', () => {
+  assert.equal(
+    unchangedLevel1WaitDedupeKey('scheduler:credit_deferred', 'candidate_batch', 'sol:a,b'),
+    'level1-wait:candidate_batch:sol:a,b',
+  );
+  assert.equal(
+    unchangedLevel1WaitDedupeKey(
+      'scheduler:backlog_high_watermark',
+      'recheck',
+      'bsc:0x1',
+    ),
+    'level1-wait:recheck:bsc:0x1',
+  );
+  assert.equal(
+    unchangedLevel1WaitDedupeKey('provider timeout', 'candidate_batch', 'sol:a,b'),
+    undefined,
+  );
 });
 
 test('scheduler batch evidence preserves cohort clock and per-candidate screening result', () => {

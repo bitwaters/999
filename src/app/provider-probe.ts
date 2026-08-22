@@ -250,6 +250,16 @@ export function level1FunnelAfterBatch(
     : funnelStatus;
 }
 
+export function unchangedLevel1WaitDedupeKey(
+  reason: string,
+  workKind: 'candidate_batch' | 'armed_batch' | 'recheck',
+  cacheKey: string,
+): string | undefined {
+  return /^scheduler:(?:credit_deferred|backlog_(?:high_watermark|hard_limit))$/u.test(reason)
+    ? `level1-wait:${workKind}:${cacheKey}`
+    : undefined;
+}
+
 export function sameChainAddress(chain: 'sol' | 'bsc', left: string, right: string): boolean {
   return chain === 'bsc' ? left.toLowerCase() === right.toLowerCase() : left === right;
 }
@@ -1651,15 +1661,19 @@ export class ProviderProbe {
       )
       .catch((error: unknown) => {
         this.touchLevel1CandidateRows(poolRows, Date.now());
-        if (supplierRequestStarted)
+        if (supplierRequestStarted) {
+          const reason = this.safeError(error);
+          const dedupeKey = unchangedLevel1WaitDedupeKey(reason, workKind, cacheKey);
           this.recordSchedulerDecision({
             decision: 'defer',
-            reason: this.safeError(error),
+            reason,
             priority: workKind,
             chain,
             workKey: `pools.multi:${cacheKey}`,
             candidates: decisionCandidates,
+            ...(dedupeKey === undefined ? {} : { dedupeKey }),
           });
+        }
         throw error;
       });
 
@@ -1706,7 +1720,8 @@ export class ProviderProbe {
         }
       }
     }
-    if (supplierRequestStarted)
+    this.schedulerDecisionKeys.delete(`level1-wait:${workKind}:${cacheKey}`);
+    if (supplierRequestStarted) {
       this.recordSchedulerDecision({
         decision: 'complete',
         reason: 'supplier_response_persisted_and_screened',
@@ -1715,6 +1730,7 @@ export class ProviderProbe {
         workKey: `pools.multi:${cacheKey}`,
         candidates: screeningResults,
       });
+    }
     return { attempted: poolRows.length, complete };
   }
 

@@ -55,8 +55,14 @@ test('validates G2 and 30-second OHLCV raw fixtures', () => {
     'G2',
   );
   assert.equal(
-    coingeckoOhlcv30sRawSchema.parse({ data: [[1000, '1', '2', '0.5', '1.5', '10']] }).data[0]![1],
-    '1',
+    coingeckoOhlcv30sRawSchema.parse({
+      data: {
+        id: 'pool',
+        type: 'ohlcv_request_response',
+        attributes: { ohlcv_list: [[1000, 1, 2, 0.5, 1.5, 10]] },
+      },
+    }).data.attributes.ohlcv_list[0]![1],
+    1,
   );
 });
 

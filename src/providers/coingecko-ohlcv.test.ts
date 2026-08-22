@@ -21,7 +21,13 @@ const pool: CanonicalPool = {
 
 test('CoinGecko OHLCV seconds become closed canonical 30s candles', () => {
   const rows = parseCoinGeckoOhlcv30s(
-    { data: [[1710000000, '1.00', '1.20', '0.90', '1.10', '100.00']] },
+    {
+      data: {
+        id: 'pool',
+        type: 'ohlcv_request_response',
+        attributes: { ohlcv_list: [[1710000000, 1, 1.2, 0.9, 1.1, 100]] },
+      },
+    },
     pool,
     1710000040000,
   );
@@ -36,21 +42,27 @@ test('CoinGecko OHLCV seconds become closed canonical 30s candles', () => {
     revision: 0,
     observedAt: 1710000040000,
     isClosed: true,
-    openPrice: '1.00',
-    highPrice: '1.20',
-    lowPrice: '0.90',
-    closePrice: '1.10',
-    volume: '100.00',
+    openPrice: '1',
+    highPrice: '1.2',
+    lowPrice: '0.9',
+    closePrice: '1.1',
+    volume: '100',
   });
 });
 
 test('invalid or still-open OHLCV rows are excluded conservatively', () => {
   const rows = parseCoinGeckoOhlcv30s(
     {
-      data: [
-        [1710000000, '1', '0.8', '0.9', '1', '1'],
-        [1710000030, '1', '1', '1', '1', '1'],
-      ],
+      data: {
+        id: 'pool',
+        type: 'ohlcv_request_response',
+        attributes: {
+          ohlcv_list: [
+            [1710000000, 1, 0.8, 0.9, 1, 1],
+            [1710000030, 1, 1, 1, 1, 1],
+          ],
+        },
+      },
     },
     pool,
     1710000055000,

@@ -22,7 +22,8 @@ export function parseCoinGeckoOhlcv30s(
   pool: CanonicalPool,
   observedAt: number,
 ): CoinGeckoOhlcvRow[] {
-  const rows = Array.isArray(response.data) ? response.data : [];
+  const rows = asRecord(asRecord(response.data)?.attributes)?.ohlcv_list;
+  if (!Array.isArray(rows)) return [];
   return rows
     .flatMap((row) => {
       if (!Array.isArray(row) || row.length !== 6 || typeof row[0] !== 'number') return [];
@@ -31,9 +32,11 @@ export function parseCoinGeckoOhlcv30s(
         const timestampMs = rawTimestamp < 1_000_000_000_000 ? rawTimestamp * 1000 : rawTimestamp;
         parseInteger(timestampMs, { min: 0 });
         const values = row.slice(1).map((value) => {
-          if (typeof value !== 'string') throw new Error('Invalid OHLCV value');
-          parseDecimalString(value, { nonNegative: true });
-          return value;
+          if (typeof value !== 'number' || !Number.isFinite(value))
+            throw new Error('Invalid OHLCV value');
+          const normalized = String(value);
+          parseDecimalString(normalized, { nonNegative: true });
+          return normalized;
         });
         if (values.some((value) => value === '')) throw new Error('Invalid OHLCV value');
         const [openPrice, highPrice, lowPrice, closePrice, volume] = values;

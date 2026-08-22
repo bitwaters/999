@@ -2,13 +2,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   armedSubscriptionsToRelease,
+  buildSchedulerDecisionPayload,
   canArmG2Candidate,
   createCandidatePoolBatches,
   evaluateCandidateAttention,
   expireStaleCandidateRows,
   g2ProbeState,
+  groupLevel1RowsByWorkKind,
   latestLevel1ObservedAt,
   level1ProbeState,
+  level1WorkDueAt,
+  nextLevel1ProbeState,
   isConfirmationWindowUsable,
   refreshConfirmationEvidence,
   selectArmCandidateRows,
@@ -54,6 +58,9 @@ test('Level 1 provider health tolerates candidate-local gaps but fails when none
   assert.equal(level1ProbeState(50, 43), 'ok');
   assert.equal(level1ProbeState(50, 0), 'failed');
   assert.throws(() => level1ProbeState(1, 2), /Invalid Level 1 probe counts/);
+  assert.equal(nextLevel1ProbeState('ok', 0, 0), 'ok');
+  assert.equal(nextLevel1ProbeState('unknown', 0, 0), 'unknown');
+  assert.equal(nextLevel1ProbeState('ok', 5, 0), 'failed');
 });
 
 test('failed Level 1 batches remain visible in attempted and failure health counts', () => {
@@ -66,6 +73,54 @@ test('failed Level 1 batches remain visible in attempted and failure health coun
   );
   assert.deepEqual(summary, { attempted: 70, complete: 48, failures: 1 });
   assert.throws(() => summarizeLevel1BatchResults([50], []), /does not match scheduled work/u);
+});
+
+test('Level 1 acceptance clocks start when each work kind actually becomes due', () => {
+  const row = { chain: 'sol' as const, updated_at: 1_000 };
+  const refresh = { recheck: 60, active: { sol: 45, bsc: 30 } };
+  assert.equal(level1WorkDueAt(row, 'candidate_batch', refresh), 1_000);
+  assert.equal(level1WorkDueAt(row, 'armed_batch', refresh), 46_000);
+  assert.equal(level1WorkDueAt(row, 'recheck', refresh), 61_000);
+  assert.equal(
+    level1WorkDueAt({ chain: 'bsc', updated_at: 2_000 }, 'armed_batch', refresh),
+    32_000,
+  );
+});
+
+test('scheduler batch evidence preserves cohort clock and per-candidate screening result', () => {
+  const payload = JSON.parse(
+    buildSchedulerDecisionPayload(
+      {
+        decision: 'complete',
+        reason: 'supplier_response_persisted_and_screened',
+        priority: 'candidate_batch',
+        chain: 'sol',
+        candidates: [
+          {
+            tokenAddress: 'token',
+            poolAddress: 'pool',
+            cycleStartedAt: 900,
+            dueAt: 1_000,
+            screeningStatus: 'complete',
+          },
+        ],
+      },
+      1_250,
+      44,
+    ),
+  ) as Record<string, unknown>;
+  assert.equal(payload.eventTime, 1_250);
+  assert.equal(payload.evidenceCutoffAt, 1_250);
+  assert.equal(payload.configVersionId, '44');
+  assert.deepEqual(payload.candidates, [
+    {
+      tokenAddress: 'token',
+      poolAddress: 'pool',
+      cycleStartedAt: 900,
+      dueAt: 1_000,
+      screeningStatus: 'complete',
+    },
+  ]);
 });
 
 test('confirmation refresh only runs for refreshable evidence gaps', () => {
@@ -211,6 +266,52 @@ test('pool request deduplication preserves both token identities sharing one poo
   );
 });
 
+test('Level 1 batches isolate priorities while a shared pool inherits Armed service', () => {
+  const rows = [
+    {
+      chain: 'bsc' as const,
+      token_address: 'armed-token',
+      pool_address: '0xPOOL',
+      status: 'armed',
+      funnel_status: 'armed',
+    },
+    {
+      chain: 'bsc' as const,
+      token_address: 'new-same-pool',
+      pool_address: '0xpool',
+      status: 'scouting',
+      funnel_status: 'pool_resolved',
+    },
+    {
+      chain: 'bsc' as const,
+      token_address: 'new-token',
+      pool_address: '0xnew',
+      status: 'scouting',
+      funnel_status: 'pool_resolved',
+    },
+    {
+      chain: 'bsc' as const,
+      token_address: 'recheck-token',
+      pool_address: '0xrecheck',
+      status: 'scouting',
+      funnel_status: 'level1_screened',
+    },
+  ];
+  const groups = groupLevel1RowsByWorkKind(rows, 'bsc');
+  assert.deepEqual(
+    groups.armed_batch.map((row) => row.token_address),
+    ['armed-token', 'new-same-pool'],
+  );
+  assert.deepEqual(
+    groups.candidate_batch.map((row) => row.token_address),
+    ['new-token'],
+  );
+  assert.deepEqual(
+    groups.recheck.map((row) => row.token_address),
+    ['recheck-token'],
+  );
+});
+
 test('Level 1 and G2 selection deduplicate pools and prioritize active candidates', () => {
   const database = openDatabase(':memory:');
   database
@@ -255,7 +356,14 @@ test('Level 1 and G2 selection deduplicate pools and prioritize active candidate
     )
     .run();
 
-  const level1 = selectLevel1CandidateRows(database, 2, 1, 1_000, { sol: 10, bsc: 10 });
+  const level1 = selectLevel1CandidateRows(
+    database,
+    2,
+    1,
+    2_000,
+    { sol: 10, bsc: 10 },
+    { recheck: 1, active: { sol: 1, bsc: 1 } },
+  );
   assert.deepEqual(
     level1.map((row) => `${row.chain}:${row.pool_address}`),
     ['bsc:pool-bsc', 'sol:pool-sol', 'sol:pool-new'],
@@ -291,11 +399,58 @@ test('bounded Level 1 window rotates processed candidates instead of starving SQ
   insert.run('token-1', 1, 1, 'pool-1', 1);
   insert.run('token-2', 2, 2, 'pool-2', 2);
   insert.run('token-3', 3, 3, 'pool-3', 3);
-  const first = selectLevel1CandidateRows(database, 1, 1, 1_000, { sol: 10, bsc: 10 });
+  const first = selectLevel1CandidateRows(
+    database,
+    1,
+    1,
+    2_000,
+    { sol: 10, bsc: 10 },
+    { recheck: 1, active: { sol: 1, bsc: 1 } },
+  );
   assert.equal(first[0]?.token_address, 'token-1');
-  database.prepare('UPDATE candidates SET updated_at = 100 WHERE id = ?').run(first[0]!.id);
-  const second = selectLevel1CandidateRows(database, 1, 1, 1_000, { sol: 10, bsc: 10 });
+  database.prepare('UPDATE candidates SET updated_at = 2000 WHERE id = ?').run(first[0]!.id);
+  const second = selectLevel1CandidateRows(
+    database,
+    1,
+    1,
+    2_000,
+    { sol: 10, bsc: 10 },
+    { recheck: 1, active: { sol: 1, bsc: 1 } },
+  );
   assert.equal(second[0]?.token_address, 'token-2');
+  database.close();
+});
+
+test('Level 1 polls new pools immediately but waits for configured recheck cadences', () => {
+  const database = openDatabase(':memory:');
+  database
+    .prepare(
+      `INSERT INTO rule_config_versions (config_hash, git_commit, run_mode, yaml_snapshot, created_at)
+       VALUES ('cadence', 'commit', 'shadow', 'yaml', 1)`,
+    )
+    .run();
+  const insert = database.prepare(
+    `INSERT INTO candidates
+     (chain, token_address, cycle_started_at, first_seen_at, last_seen_at, status,
+      pool_address, safety_status, safety_json, funnel_status, config_version_id, updated_at)
+     VALUES ('sol', ?, ?, 1, 100000, ?, ?, 'pass', '{"expiresAt":999999}', ?, 1, ?)`,
+  );
+  insert.run('new', 1, 'scouting', 'pool-new', 'pool_resolved', 99_999);
+  insert.run('recent-recheck', 2, 'scouting', 'pool-recheck', 'level1_screened', 99_999);
+  insert.run('recent-armed', 3, 'armed', 'pool-armed', 'armed', 99_999);
+  insert.run('due-recheck', 4, 'scouting', 'pool-due', 'level1_screened', 50_000);
+  const rows = selectLevel1CandidateRows(
+    database,
+    10,
+    1,
+    100_000,
+    { sol: 600, bsc: 600 },
+    { recheck: 45, active: { sol: 45, bsc: 45 } },
+  );
+  assert.deepEqual(
+    rows.map((row) => row.token_address),
+    ['new', 'due-recheck'],
+  );
   database.close();
 });
 

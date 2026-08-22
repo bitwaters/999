@@ -33,9 +33,26 @@ export const coingeckoG2RawSchema = z
   .passthrough();
 export const coingeckoOhlcv30sRawSchema = z
   .object({
-    data: z.array(
-      z.tuple([z.number(), z.string(), z.string(), z.string(), z.string(), z.string()]),
-    ),
+    data: z
+      .object({
+        id: z.string(),
+        type: z.string(),
+        attributes: z
+          .object({
+            ohlcv_list: z.array(
+              z.tuple([
+                z.number().int().nonnegative(),
+                z.number().nonnegative(),
+                z.number().nonnegative(),
+                z.number().nonnegative(),
+                z.number().nonnegative(),
+                z.number().nonnegative(),
+              ]),
+            ),
+          })
+          .passthrough(),
+      })
+      .passthrough(),
   })
   .passthrough();
 

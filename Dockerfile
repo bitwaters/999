@@ -24,6 +24,7 @@ COPY package.json package-lock.json ./
 COPY --from=production-deps /app/node_modules ./node_modules
 COPY --from=production-deps /app/dist ./dist
 COPY --from=production-deps /app/config ./config
+COPY --from=production-deps /app/scripts/level1-cohort-report.mjs ./scripts/level1-cohort-report.mjs
 COPY --from=production-deps /app/scripts/replay-report.mjs ./scripts/replay-report.mjs
 COPY --from=production-deps /app/scripts/continuous-sampler.mjs ./scripts/continuous-sampler.mjs
 COPY --from=production-deps /app/scripts/sampling-scheduler.mjs ./scripts/sampling-scheduler.mjs

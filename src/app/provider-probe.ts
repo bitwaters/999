@@ -129,6 +129,46 @@ export type ProviderProbeStatus = {
   lastError?: string;
 };
 
+export type SchedulerDecisionCandidateEvidence = {
+  tokenAddress: string;
+  poolAddress: string;
+  cycleStartedAt: number;
+  dueAt?: number;
+  screeningStatus?: 'complete' | 'incomplete';
+};
+
+type SchedulerDecisionInput = {
+  decision: string;
+  reason: string;
+  priority: string;
+  eventAt?: number;
+  chain?: 'sol' | 'bsc';
+  tokenAddress?: string;
+  poolAddress?: string;
+  cycleStartedAt?: number;
+  workKey?: string;
+  candidates?: SchedulerDecisionCandidateEvidence[];
+  dedupeKey?: string;
+};
+
+export function buildSchedulerDecisionPayload(
+  input: SchedulerDecisionInput,
+  eventAt: number,
+  configVersionId: number,
+): string {
+  return JSON.stringify({
+    decision: input.decision,
+    reason: input.reason,
+    priority: input.priority,
+    eventTime: eventAt,
+    evidenceCutoffAt: eventAt,
+    configVersionId: String(configVersionId),
+    ...(input.cycleStartedAt === undefined ? {} : { cycleStartedAt: input.cycleStartedAt }),
+    ...(input.workKey === undefined ? {} : { workKey: input.workKey }),
+    ...(input.candidates === undefined ? {} : { candidates: input.candidates }),
+  });
+}
+
 export function latestLevel1ObservedAt(poolObservedAt: number, tradeObservedAt: number): number {
   if (
     !Number.isSafeInteger(poolObservedAt) ||
@@ -159,6 +199,28 @@ export function level1ProbeState(attempted: number, complete: number): ProbeStat
     throw new Error('Invalid Level 1 probe counts');
   if (attempted === 0) return 'unknown';
   return complete > 0 ? 'ok' : 'failed';
+}
+
+export function nextLevel1ProbeState(
+  current: ProbeState,
+  attempted: number,
+  complete: number,
+): ProbeState {
+  return attempted === 0 ? current : level1ProbeState(attempted, complete);
+}
+
+export function level1WorkDueAt(
+  row: Pick<Level1CandidateRow, 'chain' | 'updated_at'>,
+  workKind: 'candidate_batch' | 'armed_batch' | 'recheck',
+  refreshSeconds: { recheck: number; active: Record<'sol' | 'bsc', number> },
+): number {
+  const delaySeconds =
+    workKind === 'candidate_batch'
+      ? 0
+      : workKind === 'armed_batch'
+        ? refreshSeconds.active[row.chain]
+        : refreshSeconds.recheck;
+  return row.updated_at + delaySeconds * 1000;
 }
 
 export function sameChainAddress(chain: 'sol' | 'bsc', left: string, right: string): boolean {
@@ -246,6 +308,10 @@ export function selectLevel1CandidateRows(
   configVersionId: number,
   now: number,
   ttlSeconds: Record<'sol' | 'bsc', number>,
+  refreshSeconds: {
+    recheck: number;
+    active: Record<'sol' | 'bsc', number>;
+  },
 ): Level1CandidateRow[] {
   if (
     !Number.isSafeInteger(limitPerChain) ||
@@ -257,7 +323,13 @@ export function selectLevel1CandidateRows(
     !Number.isSafeInteger(ttlSeconds.sol) ||
     ttlSeconds.sol <= 0 ||
     !Number.isSafeInteger(ttlSeconds.bsc) ||
-    ttlSeconds.bsc <= 0
+    ttlSeconds.bsc <= 0 ||
+    !Number.isSafeInteger(refreshSeconds.recheck) ||
+    refreshSeconds.recheck <= 0 ||
+    !Number.isSafeInteger(refreshSeconds.active.sol) ||
+    refreshSeconds.active.sol <= 0 ||
+    !Number.isSafeInteger(refreshSeconds.active.bsc) ||
+    refreshSeconds.active.bsc <= 0
   )
     throw new Error('Invalid Level 1 candidate limit');
   return database
@@ -275,13 +347,25 @@ export function selectLevel1CandidateRows(
                 OR CAST(json_extract(safety_json, '$.expiresAt') AS INTEGER) > ?)
            AND (status IN ('armed', 'confirmed-pending-anchor', 'delivered')
                 OR last_seen_at >= CASE chain WHEN 'sol' THEN ? ELSE ? END)
+           AND (
+             (status IN ('armed', 'confirmed-pending-anchor', 'delivered')
+              AND updated_at <= CASE chain WHEN 'sol' THEN ? ELSE ? END)
+             OR
+             (status NOT IN ('armed', 'confirmed-pending-anchor', 'delivered')
+              AND (
+                funnel_status NOT IN ('level1_screened', 'level1_checked')
+                OR updated_at <= ?
+              ))
+           )
        ), ranked AS (
          SELECT id, chain, token_address, pool_address, cycle_started_at, status, funnel_status, updated_at,
                 ROW_NUMBER() OVER (
                   PARTITION BY chain
                   ORDER BY
                     CASE WHEN status IN ('armed', 'confirmed-pending-anchor', 'delivered')
-                         THEN 1 ELSE 0 END DESC,
+                         THEN 0
+                         WHEN funnel_status NOT IN ('level1_screened', 'level1_checked')
+                         THEN 1 ELSE 2 END ASC,
                     updated_at ASC, pool_address ASC, token_address ASC
                 ) AS chain_rank
          FROM current_cycles WHERE cycle_rank = 1
@@ -295,6 +379,9 @@ export function selectLevel1CandidateRows(
       now,
       now - ttlSeconds.sol * 1000,
       now - ttlSeconds.bsc * 1000,
+      now - refreshSeconds.active.sol * 1000,
+      now - refreshSeconds.active.bsc * 1000,
+      now - refreshSeconds.recheck * 1000,
       limitPerChain,
     ) as Level1CandidateRow[];
 }
@@ -560,7 +647,7 @@ export class ProviderProbe {
     this.timer = setInterval(() => void this.runOnce(), intervalMs);
     this.coinGeckoTimer = setInterval(
       () => this.startCoinGeckoProbe(),
-      this.options.config.providers.coingecko.scheduler.dynamic_recheck_seconds * 1000,
+      this.options.config.providers.coingecko.scheduler.cache_ttl_seconds * 1000,
     );
     void this.runOnce();
   }
@@ -1095,47 +1182,38 @@ export class ProviderProbe {
         try {
           return await work.run(signal);
         } catch (error) {
-          if (error instanceof ProviderRequestError && error.diagnostic.status === 429)
+          if (error instanceof ProviderRequestError && error.diagnostic.status === 429) {
             this.coinGeckoScheduler.recordRateLimit(error.diagnostic.retryAfterMs);
+            try {
+              this.recordSchedulerDecision({
+                decision: 'rate_limited',
+                reason: 'provider_429',
+                priority: work.kind,
+                ...(work.chain === undefined ? {} : { chain: work.chain }),
+                workKey: work.key,
+              });
+            } catch (recordError) {
+              this.options.logger('warn', 'scheduler_decision_persist_failed', {
+                decision: 'rate_limited',
+                error: this.safeError(recordError),
+              });
+            }
+          }
           throw error;
         }
       },
     });
   }
 
-  private recordSchedulerDecision(input: {
-    decision: string;
-    reason: string;
-    priority: string;
-    chain?: 'sol' | 'bsc';
-    tokenAddress?: string;
-    poolAddress?: string;
-    cycleStartedAt?: number;
-    workKey?: string;
-    candidates?: Array<{
-      tokenAddress: string;
-      poolAddress: string;
-      cycleStartedAt: number;
-    }>;
-    dedupeKey?: string;
-  }): void {
+  private recordSchedulerDecision(input: SchedulerDecisionInput): void {
     if (input.dedupeKey) {
       if (this.schedulerDecisionKeys.has(input.dedupeKey)) return;
       if (this.schedulerDecisionKeys.size >= 20_000) this.schedulerDecisionKeys.clear();
       this.schedulerDecisionKeys.add(input.dedupeKey);
     }
     const observedAt = Date.now();
-    const payload = JSON.stringify({
-      decision: input.decision,
-      reason: input.reason,
-      priority: input.priority,
-      eventTime: observedAt,
-      evidenceCutoffAt: observedAt,
-      configVersionId: String(this.options.configVersionId),
-      ...(input.cycleStartedAt === undefined ? {} : { cycleStartedAt: input.cycleStartedAt }),
-      ...(input.workKey === undefined ? {} : { workKey: input.workKey }),
-      ...(input.candidates === undefined ? {} : { candidates: input.candidates }),
-    });
+    const eventAt = input.eventAt ?? observedAt;
+    const payload = buildSchedulerDecisionPayload(input, eventAt, this.options.configVersionId);
     insertProviderEvent(
       this.options.database,
       {
@@ -1144,7 +1222,7 @@ export class ProviderProbe {
         ...(input.chain === undefined ? {} : { chain: input.chain }),
         ...(input.tokenAddress === undefined ? {} : { tokenAddress: input.tokenAddress }),
         ...(input.poolAddress === undefined ? {} : { poolAddress: input.poolAddress }),
-        eventAt: observedAt,
+        eventAt,
         observedAt,
         schemaVersion: 'runtime.scheduler.decision.v1',
         payload,
@@ -1262,6 +1340,13 @@ export class ProviderProbe {
         sol: this.options.config.chains.sol.discovery.candidate_ttl_seconds,
         bsc: this.options.config.chains.bsc.discovery.candidate_ttl_seconds,
       },
+      {
+        recheck: this.options.config.providers.coingecko.scheduler.dynamic_recheck_seconds,
+        active: {
+          sol: this.options.config.chains.sol.level1.refresh_interval_seconds,
+          bsc: this.options.config.chains.bsc.level1.refresh_interval_seconds,
+        },
+      },
     );
     const batchJobs: Array<{
       expected: number;
@@ -1269,15 +1354,18 @@ export class ProviderProbe {
     }> = [];
     for (const chain of ['sol', 'bsc'] as const) {
       const chainRows = rows.filter((row) => row.chain === chain);
-      for (const candidateRows of createCandidatePoolBatches(
-        chainRows,
-        chain,
-        this.options.config.providers.coingecko.max_pools_per_batch,
-      )) {
-        batchJobs.push({
-          expected: candidateRows.length,
-          promise: this.refreshLevel1Batch(key, chain, candidateRows),
-        });
+      const groups = groupLevel1RowsByWorkKind(chainRows, chain);
+      for (const workKind of ['candidate_batch', 'armed_batch', 'recheck'] as const) {
+        for (const candidateRows of createCandidatePoolBatches(
+          groups[workKind],
+          chain,
+          this.options.config.providers.coingecko.max_pools_per_batch,
+        )) {
+          batchJobs.push({
+            expected: candidateRows.length,
+            promise: this.refreshLevel1Batch(key, chain, candidateRows, workKind),
+          });
+        }
       }
     }
     const results = await Promise.allSettled(batchJobs.map((job) => job.promise));
@@ -1286,7 +1374,7 @@ export class ProviderProbe {
       results,
     );
     const { attempted, complete, failures } = summary;
-    this.level1 = level1ProbeState(attempted, complete);
+    this.level1 = nextLevel1ProbeState(this.level1, attempted, complete);
     this.options.logger(
       this.level1 === 'ok' && failures === 0 ? 'info' : 'warn',
       'level1_probe_summary',
@@ -1305,6 +1393,7 @@ export class ProviderProbe {
     key: string,
     chain: 'sol' | 'bsc',
     poolRows: Level1CandidateRow[],
+    workKind: 'candidate_batch' | 'armed_batch' | 'recheck',
   ): Promise<{ attempted: number; complete: number }> {
     const network = chain === 'sol' ? 'solana' : 'bsc';
     const addresses = [
@@ -1320,17 +1409,18 @@ export class ProviderProbe {
       .sort()
       .join(',')}`;
     const requestedAt = Date.now();
-    const activeStatuses = new Set(['armed', 'confirmed-pending-anchor', 'delivered']);
-    const containsNewCandidate = poolRows.some(
-      (row) =>
-        !activeStatuses.has(row.status) &&
-        !['level1_screened', 'level1_checked'].includes(row.funnel_status),
-    );
-    const workKind = containsNewCandidate
-      ? 'candidate_batch'
-      : poolRows.some((row) => activeStatuses.has(row.status))
-        ? 'armed_batch'
-        : 'recheck';
+    const decisionCandidates = poolRows.map((row) => ({
+      tokenAddress: row.token_address,
+      poolAddress: row.pool_address,
+      cycleStartedAt: row.cycle_started_at,
+      dueAt: level1WorkDueAt(row, workKind, {
+        recheck: this.options.config.providers.coingecko.scheduler.dynamic_recheck_seconds,
+        active: {
+          sol: this.options.config.chains.sol.level1.refresh_interval_seconds,
+          bsc: this.options.config.chains.bsc.level1.refresh_interval_seconds,
+        },
+      }),
+    }));
     let supplierRequestStarted = false;
     const { parsed, observedAt } = await this.level1BatchCache
       .getOrLoad(
@@ -1392,32 +1482,17 @@ export class ProviderProbe {
             priority: workKind,
             chain,
             workKey: `pools.multi:${cacheKey}`,
-            candidates: poolRows.map((row) => ({
-              tokenAddress: row.token_address,
-              poolAddress: row.pool_address,
-              cycleStartedAt: row.cycle_started_at,
-            })),
+            candidates: decisionCandidates,
           });
         throw error;
       });
 
     this.touchLevel1CandidateRows(poolRows, observedAt);
-    if (supplierRequestStarted)
-      this.recordSchedulerDecision({
-        decision: 'complete',
-        reason: 'supplier_response_persisted',
-        priority: workKind,
-        chain,
-        workKey: `pools.multi:${cacheKey}`,
-        candidates: poolRows.map((row) => ({
-          tokenAddress: row.token_address,
-          poolAddress: row.pool_address,
-          cycleStartedAt: row.cycle_started_at,
-        })),
-      });
-
+    const screeningResults: SchedulerDecisionCandidateEvidence[] = decisionCandidates.map(
+      (candidate) => ({ ...candidate, screeningStatus: 'incomplete' }),
+    );
     let complete = 0;
-    for (const row of poolRows) {
+    for (const [rowIndex, row] of poolRows.entries()) {
       const raw = poolRawForAddress(parsed, network, row.pool_address, row.token_address);
       if (!raw) continue;
       const parsedPool = parsePool(raw, chain, row.token_address);
@@ -1433,6 +1508,7 @@ export class ProviderProbe {
       );
       if (screening.status !== 'complete') continue;
       complete += 1;
+      screeningResults[rowIndex]!.screeningStatus = 'complete';
       const waitingKey = finalistKey({
         chain,
         tokenAddress: row.token_address,
@@ -1465,6 +1541,15 @@ export class ProviderProbe {
         context.addRows(info.changes);
       });
     }
+    if (supplierRequestStarted)
+      this.recordSchedulerDecision({
+        decision: 'complete',
+        reason: 'supplier_response_persisted_and_screened',
+        priority: workKind,
+        chain,
+        workKey: `pools.multi:${cacheKey}`,
+        candidates: screeningResults,
+      });
     return { attempted: poolRows.length, complete };
   }
 
@@ -2164,8 +2249,7 @@ export class ProviderProbe {
         ),
     });
     const observedAt = Date.now();
-    const parsed = coingeckoOhlcv30sRawSchema.parse(result.data);
-    const payload = JSON.stringify(parsed);
+    const payload = JSON.stringify(result.data);
     const providerEvent = insertProviderEvent(
       this.options.database,
       {
@@ -2175,7 +2259,7 @@ export class ProviderProbe {
         tokenAddress: pool.tokenAddress,
         poolAddress: pool.poolAddress,
         observedAt,
-        schemaVersion: 'coingecko.ohlcv.30s.v1',
+        schemaVersion: 'coingecko.ohlcv.30s.v2',
         payload,
         billingBucket: 'outcome',
         requestMeta: {
@@ -2187,6 +2271,7 @@ export class ProviderProbe {
       },
       this.options.writeBudget,
     );
+    const parsed = coingeckoOhlcv30sRawSchema.parse(result.data);
     const rows = parseCoinGeckoOhlcv30s(parsed, pool, observedAt).filter(
       (row) =>
         row.timestampMs < now + 30_000 && row.timestampMs + 30_000 > anchorDeliveredAt - 30_000,
@@ -2224,7 +2309,7 @@ export class ProviderProbe {
             `INSERT INTO candles_30s
              (provider_event_id, chain, pool_address, token_address, target_side, interval_seconds,
               open_time, revision, observed_at, is_closed, open_price, high_price, low_price, close_price, volume, parser_version)
-             VALUES (?, ?, ?, ?, ?, 30, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'coingecko.ohlcv.30s.v1')`,
+             VALUES (?, ?, ?, ?, ?, 30, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'coingecko.ohlcv.30s.v2')`,
           )
           .run(
             providerEvent.id,
@@ -3448,6 +3533,41 @@ export function createCandidatePoolBatches<
         addresses.has(chain === 'bsc' ? row.pool_address.toLowerCase() : row.pool_address),
     );
   });
+}
+
+export function groupLevel1RowsByWorkKind<
+  T extends {
+    chain: 'sol' | 'bsc';
+    pool_address: string;
+    status: string;
+    funnel_status: string;
+  },
+>(rows: T[], chain: 'sol' | 'bsc'): Record<'candidate_batch' | 'armed_batch' | 'recheck', T[]> {
+  const priority = { armed_batch: 0, candidate_batch: 1, recheck: 2 } as const;
+  const poolKinds = new Map<string, keyof typeof priority>();
+  for (const row of rows) {
+    if (row.chain !== chain) continue;
+    const poolKey = chain === 'bsc' ? row.pool_address.toLowerCase() : row.pool_address;
+    const kind = ['armed', 'confirmed-pending-anchor', 'delivered'].includes(row.status)
+      ? 'armed_batch'
+      : ['level1_screened', 'level1_checked'].includes(row.funnel_status)
+        ? 'recheck'
+        : 'candidate_batch';
+    const current = poolKinds.get(poolKey);
+    if (current === undefined || priority[kind] < priority[current]) poolKinds.set(poolKey, kind);
+  }
+  const groups: Record<keyof typeof priority, T[]> = {
+    candidate_batch: [],
+    armed_batch: [],
+    recheck: [],
+  };
+  for (const row of rows) {
+    if (row.chain !== chain) continue;
+    const poolKey = chain === 'bsc' ? row.pool_address.toLowerCase() : row.pool_address;
+    const kind = poolKinds.get(poolKey);
+    if (kind) groups[kind].push(row);
+  }
+  return groups;
 }
 
 function findPoolAttributes(

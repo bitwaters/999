@@ -43,7 +43,7 @@
 
 ## 7. Shadow 部署与样本验收
 
-- [ ] 7.1 仅通过本地提交、唯一 main、GitHub 和服务器 deploy.sh 部署自适应 Shadow/admin anchor；核对 commit/config hash/schema/锚点/健康且服务器 worktree clean。
+- [x] 7.1 仅通过本地提交、唯一 main、GitHub 和服务器 deploy.sh 部署自适应 Shadow/admin anchor；核对 commit/config hash/schema/锚点/健康且服务器 worktree clean。（`35b5ce2` 已按规定部署：config hash `ff61b38b…c5c4`、schema v3、Shadow/admin-only、全组件 healthy、服务器 main/worktree clean，sampler 已停止）
 - [ ] 7.2 按 chain + git commit + config version cohort 累计，每链同一 cohort 至少 500 个有效 batch candidates 与 50 个 finalists 后进行首轮工程评审：无 rate/credit defer 样本中 safety-pass due→batch complete P95≤10 秒、reservation→Armed 后 G2 发起 P95≤10 秒，同语料 REST calls 降幅≥80%、本地并发/限流错误造成的 429=0；修复后可用新 cohort 重评但旧异常保留，defer 单列端到端延迟、credits 投影与 backlog，不按自然日清零或强制结束。
 - [ ] 7.3 在真实 Signal/Outcome 样本不足时仅确认工程指标并继续 Shadow；达到约定分链样本量后再评审参数、可执行率和 production，失败则通过 Git main/deploy.sh 回滚。
 - [ ] 7.4 仅在本变更准备归档时，确认 `build-meme-signal-bot` 已先归档为 canonical specs，复核重叠条款并把本变更转换为正确 capability 的 MODIFIED delta；不得阻塞本地实施或 Shadow 验证，实施期间始终以基线硬约束优先。

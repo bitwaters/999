@@ -58,7 +58,7 @@ providers:
       reserve_percent: 5
     g2:
       max_sockets: 1
-      max_subscriptions_per_socket: 50
+      max_subscriptions_per_socket: 4
       rolling_credits_per_message_upper_bound: 10
   telegram:
     bot_token_env: TELEGRAM_BOT_TOKEN

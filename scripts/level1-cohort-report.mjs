@@ -185,7 +185,8 @@ const currentBacklogRows = database
   .prepare(
     `SELECT chain, status, funnel_status, updated_at, last_seen_at, safety_json
      FROM candidates
-     WHERE config_version_id = ? AND safety_status = 'pass' AND status != 'expired'
+     WHERE config_version_id = ? AND safety_status = 'pass'
+       AND status NOT IN ('expired', 'delivered', 'completed')
        AND pool_address IS NOT NULL`,
   )
   .all(cohort.id);
@@ -201,7 +202,7 @@ for (const row of currentBacklogRows) {
     Number(row.last_seen_at) >=
     reportNow - Number(chainConfig?.discovery?.candidate_ttl_seconds) * 1000;
   if ((Number.isFinite(expiresAt) && expiresAt <= reportNow) || !candidateFresh) continue;
-  const active = ['armed', 'confirmed-pending-anchor', 'delivered'].includes(row.status);
+  const active = ['armed', 'confirmed-pending-anchor'].includes(row.status);
   const unscreened = !['level1_screened', 'level1_checked'].includes(row.funnel_status);
   const delaySeconds = active
     ? Number(chainConfig?.level1?.refresh_interval_seconds)

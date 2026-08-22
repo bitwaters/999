@@ -278,7 +278,10 @@ export async function refreshConfirmationEvidence(input: {
 export function shouldRearmG2Candidate(status: string, funnelStatus: string): boolean {
   return (
     status !== 'expired' &&
-    (status === 'armed' || funnelStatus === 'level1_screened' || funnelStatus === 'level1_checked')
+    (status === 'armed' ||
+      status === 'confirmed-pending-anchor' ||
+      funnelStatus === 'level1_screened' ||
+      funnelStatus === 'level1_checked')
   );
 }
 
@@ -299,6 +302,22 @@ export function armedSubscriptionsToRelease(
     .filter(([identityKey, state]) => state === 'armed' && !desiredArmed.has(identityKey))
     .map(([identityKey]) => identityKey)
     .sort();
+}
+
+export function planExistingG2Capacity<T extends { row: { status: string } }>(
+  rows: T[],
+  capacity: number,
+): { retained: T[]; demoted: T[]; overflowed: boolean } {
+  if (!Number.isSafeInteger(capacity) || capacity <= 0) throw new Error('Invalid G2 capacity');
+  if (rows.length <= capacity) return { retained: rows, demoted: [], overflowed: false };
+  const retained = rows
+    .filter(({ row }) => row.status === 'confirmed-pending-anchor')
+    .slice(0, capacity);
+  return {
+    retained,
+    demoted: rows.filter(({ row }) => row.status === 'armed'),
+    overflowed: true,
+  };
 }
 
 type Level1CandidateRow = {
@@ -351,17 +370,18 @@ export function selectLevel1CandidateRows(
                   ORDER BY cycle_started_at DESC, id DESC
                 ) AS cycle_rank
          FROM candidates
-         WHERE config_version_id = ? AND safety_status = 'pass' AND status != 'expired'
+         WHERE config_version_id = ? AND safety_status = 'pass'
+           AND status NOT IN ('expired', 'delivered', 'completed')
            AND pool_address IS NOT NULL
-           AND (status IN ('armed', 'confirmed-pending-anchor', 'delivered')
+           AND (status IN ('armed', 'confirmed-pending-anchor')
                 OR CAST(json_extract(safety_json, '$.expiresAt') AS INTEGER) > ?)
-           AND (status IN ('armed', 'confirmed-pending-anchor', 'delivered')
+           AND (status IN ('armed', 'confirmed-pending-anchor')
                 OR last_seen_at >= CASE chain WHEN 'sol' THEN ? ELSE ? END)
            AND (
-             (status IN ('armed', 'confirmed-pending-anchor', 'delivered')
+             (status IN ('armed', 'confirmed-pending-anchor')
               AND updated_at <= CASE chain WHEN 'sol' THEN ? ELSE ? END)
              OR
-             (status NOT IN ('armed', 'confirmed-pending-anchor', 'delivered')
+             (status NOT IN ('armed', 'confirmed-pending-anchor')
               AND (
                 funnel_status NOT IN ('level1_screened', 'level1_checked')
                 OR updated_at <= ?
@@ -372,7 +392,7 @@ export function selectLevel1CandidateRows(
                 ROW_NUMBER() OVER (
                   PARTITION BY chain
                   ORDER BY
-                    CASE WHEN status IN ('armed', 'confirmed-pending-anchor', 'delivered')
+                    CASE WHEN status IN ('armed', 'confirmed-pending-anchor')
                          THEN 0
                          WHEN funnel_status NOT IN ('level1_screened', 'level1_checked')
                          THEN 1 ELSE 2 END ASC,
@@ -407,18 +427,19 @@ export function readLevel1Backlog(
     .prepare(
       `WITH eligible AS (
          SELECT CASE
-                  WHEN status IN ('armed', 'confirmed-pending-anchor', 'delivered')
+                  WHEN status IN ('armed', 'confirmed-pending-anchor')
                     THEN updated_at + CASE chain WHEN 'sol' THEN ? ELSE ? END
                   WHEN funnel_status NOT IN ('level1_screened', 'level1_checked')
                     THEN updated_at
                   ELSE updated_at + ?
                 END AS due_at
          FROM candidates
-         WHERE config_version_id = ? AND safety_status = 'pass' AND status != 'expired'
+         WHERE config_version_id = ? AND safety_status = 'pass'
+           AND status NOT IN ('expired', 'delivered', 'completed')
            AND pool_address IS NOT NULL
-           AND (status IN ('armed', 'confirmed-pending-anchor', 'delivered')
+           AND (status IN ('armed', 'confirmed-pending-anchor')
                 OR CAST(json_extract(safety_json, '$.expiresAt') AS INTEGER) > ?)
-           AND (status IN ('armed', 'confirmed-pending-anchor', 'delivered')
+           AND (status IN ('armed', 'confirmed-pending-anchor')
                 OR last_seen_at >= CASE chain WHEN 'sol' THEN ? ELSE ? END)
        )
        SELECT COUNT(*) AS count, MIN(due_at) AS oldest_at FROM eligible WHERE due_at <= ?`,
@@ -527,19 +548,20 @@ export function selectArmCandidateRows(
                   ORDER BY cycle_started_at DESC, id DESC
                 ) AS cycle_rank
          FROM candidates
-         WHERE config_version_id = ? AND safety_status = 'pass' AND status != 'expired'
+         WHERE config_version_id = ? AND safety_status = 'pass'
+           AND status NOT IN ('expired', 'delivered', 'completed')
            AND pool_address IS NOT NULL
-           AND (status IN ('armed', 'confirmed-pending-anchor', 'delivered')
+           AND (status IN ('armed', 'confirmed-pending-anchor')
                 OR CAST(json_extract(safety_json, '$.expiresAt') AS INTEGER) > ?)
-           AND (status IN ('armed', 'confirmed-pending-anchor', 'delivered')
+           AND (status IN ('armed', 'confirmed-pending-anchor')
                 OR last_seen_at >= CASE chain WHEN 'sol' THEN ? ELSE ? END)
            AND (funnel_status IN ('level1_screened', 'level1_checked', 'armed', 'confirmed-pending-anchor')
-                OR status IN ('armed', 'confirmed-pending-anchor', 'delivered'))
+                OR status IN ('armed', 'confirmed-pending-anchor'))
        ), ranked AS (
          SELECT id, chain, token_address, pool_address, cycle_started_at, status, funnel_status, updated_at,
                 ROW_NUMBER() OVER (
                   PARTITION BY chain
-                  ORDER BY CASE WHEN status IN ('armed', 'confirmed-pending-anchor', 'delivered')
+                  ORDER BY CASE WHEN status IN ('armed', 'confirmed-pending-anchor')
                                 THEN 1 ELSE 0 END DESC,
                            updated_at DESC, pool_address ASC, token_address ASC
                 ) AS chain_rank
@@ -1423,8 +1445,12 @@ export class ProviderProbe {
       batchJobs.map((job) => job.expected),
       results,
     );
-    const { attempted, complete, failures } = summary;
-    this.level1 = nextLevel1ProbeState(this.level1, batchJobs.length, failures);
+    const { attempted, complete, failures, deferred } = summary;
+    this.level1 = nextLevel1ProbeState(
+      this.level1,
+      batchJobs.length,
+      Math.max(0, failures - deferred),
+    );
     this.options.logger(
       this.level1 === 'ok' && failures === 0 ? 'info' : 'warn',
       'level1_probe_summary',
@@ -1433,6 +1459,7 @@ export class ProviderProbe {
         complete,
         incomplete: attempted - complete,
         batch_failures: failures,
+        batch_deferred: deferred,
         scheduler: this.coinGeckoScheduler.stats(),
         status: this.level1,
       },
@@ -1658,7 +1685,7 @@ export class ProviderProbe {
       const cycle = this.trackers[row.chain].get(row.chain, row.token_address);
       if (!pool) continue;
       if (
-        ['armed', 'confirmed-pending-anchor', 'delivered'].includes(row.status) ||
+        ['armed', 'confirmed-pending-anchor'].includes(row.status) ||
         ['armed', 'confirmed-pending-anchor'].includes(row.funnel_status)
       ) {
         existingArmed.push({ row, pool });
@@ -1685,16 +1712,22 @@ export class ProviderProbe {
       onMessage: (message, observedAt) => this.recordG2Message(message, observedAt),
     });
     await this.g2Client.start();
-    const desired = new Set(existingArmed.map(({ pool }) => pool.identityKey));
+    const capacityPlan = planExistingG2Capacity(
+      existingArmed,
+      this.options.config.providers.coingecko.g2.max_subscriptions_per_socket,
+    );
+    if (capacityPlan.demoted.length > 0) this.demoteArmedForG2Capacity(capacityPlan.demoted);
+    const desired = new Set(capacityPlan.retained.map(({ pool }) => pool.identityKey));
     for (const identityKey of armedSubscriptionsToRelease(this.g2Client.active(), desired))
       this.g2Client.unset(identityKey);
     this.finalistReservations.reconcileOccupied(desired);
-    for (const { row, pool } of existingArmed) {
+    for (const { row, pool } of capacityPlan.retained) {
       const state = row.status === 'armed' ? 'armed' : 'confirmed-pending-anchor';
       if (state === 'confirmed-pending-anchor' && !this.g2Client.active().has(pool.identityKey))
         this.g2Client.request(pool, 'armed');
       this.g2Client.request(pool, state);
     }
+    if (capacityPlan.overflowed) return;
 
     const finalistSortAt = Date.now();
     const finalistMaxWaitMs =
@@ -2009,6 +2042,36 @@ export class ProviderProbe {
       pool_address: row.pool_address,
       cycle_started_at: row.cycle_started_at,
     });
+  }
+
+  private demoteArmedForG2Capacity(
+    items: Array<{ row: ArmCandidateRow; pool: CanonicalPool }>,
+  ): void {
+    const at = Date.now();
+    boundedWrite(this.options.database, this.options.writeBudget, (context) => {
+      const update = this.options.database.prepare(
+        `UPDATE candidates
+         SET status = 'scouting', funnel_status = 'level1_screened', updated_at = ?
+         WHERE id = ? AND cycle_started_at = ? AND config_version_id = ? AND status = 'armed'`,
+      );
+      for (const { row } of items)
+        context.addRows(
+          update.run(at, row.id, row.cycle_started_at, this.options.configVersionId).changes,
+        );
+    });
+    for (const { row, pool } of items) {
+      this.g2Client?.unset(pool.identityKey);
+      this.finalistReservations.releaseOccupied(pool.identityKey);
+      this.recordSchedulerDecision({
+        decision: 'armed_reverted',
+        reason: 'g2:capacity_rebalance',
+        priority: 'candidate_batch',
+        chain: row.chain,
+        tokenAddress: row.token_address,
+        poolAddress: row.pool_address,
+        cycleStartedAt: row.cycle_started_at,
+      });
+    }
   }
 
   private restorePreviousLevel1Snapshot(
@@ -3146,12 +3209,13 @@ export class ProviderProbe {
 export function summarizeLevel1BatchResults(
   expectedCounts: number[],
   results: PromiseSettledResult<{ attempted: number; complete: number }>[],
-): { attempted: number; complete: number; failures: number } {
+): { attempted: number; complete: number; failures: number; deferred: number } {
   if (expectedCounts.length !== results.length)
     throw new Error('Level 1 batch result count does not match scheduled work');
   let attempted = 0;
   let complete = 0;
   let failures = 0;
+  let deferred = 0;
   for (const [index, result] of results.entries()) {
     if (result.status === 'fulfilled') {
       attempted += result.value.attempted;
@@ -3159,10 +3223,13 @@ export function summarizeLevel1BatchResults(
     } else {
       attempted += expectedCounts[index] ?? 0;
       failures += 1;
+      const message =
+        result.reason instanceof Error ? result.reason.message : String(result.reason);
+      if (message.startsWith('scheduler:credit_deferred')) deferred += 1;
     }
   }
   if (complete > attempted) throw new Error('Invalid Level 1 batch summary');
-  return { attempted, complete, failures };
+  return { attempted, complete, failures, deferred };
 }
 
 function httpOptions(
@@ -3594,7 +3661,7 @@ export function groupLevel1RowsByWorkKind<
   for (const row of rows) {
     if (row.chain !== chain) continue;
     const poolKey = chain === 'bsc' ? row.pool_address.toLowerCase() : row.pool_address;
-    const kind = ['armed', 'confirmed-pending-anchor', 'delivered'].includes(row.status)
+    const kind = ['armed', 'confirmed-pending-anchor'].includes(row.status)
       ? 'armed_batch'
       : ['level1_screened', 'level1_checked'].includes(row.funnel_status)
         ? 'recheck'

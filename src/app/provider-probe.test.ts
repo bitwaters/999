@@ -14,6 +14,7 @@ import {
   level1FunnelAfterBatch,
   level1WorkDueAt,
   nextLevel1ProbeState,
+  planExistingG2Capacity,
   readLevel1Backlog,
   isConfirmationWindowUsable,
   refreshConfirmationEvidence,
@@ -72,10 +73,10 @@ test('failed Level 1 batches remain visible in attempted and failure health coun
     [50, 20],
     [
       { status: 'fulfilled', value: { attempted: 50, complete: 48 } },
-      { status: 'rejected', reason: new Error('timeout') },
+      { status: 'rejected', reason: new Error('scheduler:credit_deferred') },
     ],
   );
-  assert.deepEqual(summary, { attempted: 70, complete: 48, failures: 1 });
+  assert.deepEqual(summary, { attempted: 70, complete: 48, failures: 1, deferred: 1 });
   assert.throws(() => summarizeLevel1BatchResults([50], []), /does not match scheduled work/u);
 });
 
@@ -198,6 +199,11 @@ test('confirmation refresh validates safety before spending CoinGecko work', asy
 
 test('G2 re-arms persisted candidates after a process restart', () => {
   assert.equal(shouldRearmG2Candidate('armed', 'armed'), true);
+  assert.equal(
+    shouldRearmG2Candidate('confirmed-pending-anchor', 'confirmed-pending-anchor'),
+    true,
+  );
+  assert.equal(shouldRearmG2Candidate('delivered', 'delivered'), false);
   assert.equal(shouldRearmG2Candidate('scouting', 'level1_checked'), true);
   assert.equal(shouldRearmG2Candidate('scouting', 'armed'), false);
   assert.equal(shouldRearmG2Candidate('expired', 'armed'), false);
@@ -219,6 +225,25 @@ test('G2 reconciliation releases obsolete Armed pools but preserves pending anch
   assert.deepEqual(armedSubscriptionsToRelease(active, new Set(['bsc:keep:token'])), [
     'bsc:old:token',
   ]);
+});
+
+test('G2 capacity shrink preserves pending anchors and requeues Armed candidates', () => {
+  const rows = [
+    { row: { status: 'confirmed-pending-anchor' }, id: 'anchor' },
+    { row: { status: 'armed' }, id: 'a' },
+    { row: { status: 'armed' }, id: 'b' },
+  ];
+  const plan = planExistingG2Capacity(rows, 2);
+  assert.equal(plan.overflowed, true);
+  assert.deepEqual(
+    plan.retained.map((row) => row.id),
+    ['anchor'],
+  );
+  assert.deepEqual(
+    plan.demoted.map((row) => row.id),
+    ['a', 'b'],
+  );
+  assert.equal(planExistingG2Capacity(rows.slice(0, 2), 2).overflowed, false);
 });
 
 test('candidate Attention accepts improvement from any allowed discovery source', () => {
@@ -454,6 +479,7 @@ test('Level 1 polls new pools immediately but waits for configured recheck caden
   insert.run('recent-recheck', 2, 'scouting', 'pool-recheck', 'level1_screened', 99_999);
   insert.run('recent-armed', 3, 'armed', 'pool-armed', 'armed', 99_999);
   insert.run('due-recheck', 4, 'scouting', 'pool-due', 'level1_screened', 50_000);
+  insert.run('delivered', 5, 'delivered', 'pool-delivered', 'delivered', 1);
   const rows = selectLevel1CandidateRows(
     database,
     10,

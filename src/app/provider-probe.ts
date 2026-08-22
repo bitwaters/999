@@ -1605,6 +1605,7 @@ export class ProviderProbe {
         }
       }
     }
+    if (batchJobs.length === 0) return;
     const results = await Promise.allSettled(batchJobs.map((job) => job.promise));
     const summary = summarizeLevel1BatchResults(
       batchJobs.map((job) => job.expected),

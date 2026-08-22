@@ -68,7 +68,7 @@ reservation 不预先创建 G2 socket，也不新增持久化表。关键状态�
 
 ### 8. 截止时间调度同时保护确认与 Outcome
 
-调度器分别为确认和必要 Outcome 保留请求/RPM 份额及月度 credit bucket。正常情况下按确认刷新、新候选批量、Armed 批量、动态复查、非紧急 Outcome 分配非保留容量；一旦工作到达 `latest_start_at = final_deadline - timeout_and_retry_budget`，即晋升最高优先级并使用对应保留资源。发生过载时先停止动态复查和新候选接纳，不允许已知必要 Outcome 因永久排在队尾而越过最终 cutoff。
+调度器分别为确认和必要 Outcome 保留请求/RPM 份额；月度 credits 只有 Key 级总预算，不伪造分项 bucket。正常情况下按确认刷新、新候选批量、Armed 批量、动态复查、非紧急 Outcome 分配非保留容量；一旦工作到达 `latest_start_at = final_deadline - timeout_and_retry_budget`，即晋升最高优先级并使用对应保留资源。发生过载时先停止动态复查和新候选接纳，不允许已知必要 Outcome 因永久排在队尾而越过最终 cutoff。系统使用总 burn projection 而不伪造 G2 per-message 成本；production credit defer 同时退出普通 Armed 并停止新 G2 admission，保留 confirmed-pending-anchor，Shadow 只记录 G2 burn 供评审。
 
 ### 9. 以离线 A/B 和单一 Shadow 路径迁移
 

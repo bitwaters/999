@@ -23,6 +23,7 @@ import {
   readPersistedOutcomePool,
   recordOutcomeEntryCoverage,
   readLevel1Backlog,
+  retainG2SubscriptionDuringCreditPressure,
   isConfirmationWindowUsable,
   refreshConfirmationEvidence,
   selectArmCandidateRows,
@@ -310,6 +311,16 @@ test('ordinary Armed subscriptions rotate after the configured lease but anchors
   assert.equal(g2ArmedLeaseState('armed', 1_000, 120_999, 120), 'active');
   assert.equal(g2ArmedLeaseState('armed', 1_000, 121_000, 120), 'elapsed');
   assert.equal(g2ArmedLeaseState('confirmed-pending-anchor', 1_000, 999_000, 120), 'not_armed');
+});
+
+test('production credit pressure releases ordinary G2 but preserves Outcome anchors', () => {
+  assert.equal(retainG2SubscriptionDuringCreditPressure('shadow', true, 'armed'), true);
+  assert.equal(retainG2SubscriptionDuringCreditPressure('production', false, 'armed'), true);
+  assert.equal(retainG2SubscriptionDuringCreditPressure('production', true, 'armed'), false);
+  assert.equal(
+    retainG2SubscriptionDuringCreditPressure('production', true, 'confirmed-pending-anchor'),
+    true,
+  );
 });
 
 test('candidate rediscovery keeps anchor history immutable and requeues old-config Armed state', () => {

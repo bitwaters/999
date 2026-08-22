@@ -1,6 +1,6 @@
 # Meme 信号推送 Bot 开发文档
 
-> 版本：3.12.0
+> 版本：3.13.0
 > 状态：开发设计基线；供应商待验证项与参数经 Shadow 评审后方可生产
 > 网络：Solana、BSC
 > 数据源：GMGN Agent API、CoinGecko Analyst API
@@ -360,21 +360,11 @@ Analyst 500,000 credits/月的初始分配：
 | 校验/回补 | 10% |
 | 故障余量 | 5% |
 
-```text
-allowed_ws_credit_rate =
-  remaining_ws_credits / remaining_month_seconds
+CoinGecko `/key` 只提供 API Key 总 credits 余额，REST 与 G2 并发时不能可靠拆出单条 G2 消息成本；系统不得用总余额差分伪造 per-message 账单。统一调度器直接使用 `/key` 的实际月额度、已用额度、剩余月份时间和总 burn rate 投影。Shadow 记录并报告真实消耗；production 投影会在月末前耗尽时暂停新批筛、退出普通 `armed` G2 并停止新 G2 admission，只保留 `confirmed-pending-anchor` 必要 Outcome。压力解除后复用现有 Level 1 due/reservation 流程恢复，不新增 credits ledger、控制器或第二套队列。
 
-allowed_message_rate =
-  allowed_ws_credit_rate / rolling_credits_per_message
-```
+G2 事件按业务用途而不是按 socket 归属：确认前至锚点送达归入“G2 确认”，锚点送达后为寻找 entry 和补齐 entry-partial 而继续保留的 G2 归入“Outcome”。该 bucket 只用于事件量与生命周期审计，不代表单条消息 credits；总 credits 预算只采用 `/key` 余额与 burn 投影，避免重复计费或伪精度。
 
-`rolling_credits_per_message` 来自真实账单/余额差分的保守滚动估计；尚未得到可信估计时不得把 1 message 当作 1 credit，只能使用配置化保守上界并在 Shadow 报告中标记估算状态。
-
-burn rate 超标时取消低优先候选、降低非必需校验。低水位只保留必要 Outcome 和最高优先候选。
-
-G2 成本按用途而不是按 socket 归属：确认前至锚点送达计入“G2 确认”，锚点送达后为寻找 entry 和补齐 entry-partial 而继续保留的 G2 计入“Outcome”。同一条消息只能记入一个 bucket；计费用途和关联 candidate/signal 随对应 `provider_event` 保存并按需聚合，不新增 credits ledger 表，避免预算报表重复计费。
-
-以上 credits 低水位降级只属于未来 production 保护策略。开发与持续采样阶段不设置剩余 credits 自动停止线，只记录调用量、burn rate 和 `/key` 余额，避免因人为阈值中断样本累计。
+以上 G2 订阅降级只属于 production 保护策略；Shadow 仍按真实月度预算延后低优先 REST 工作，但不因人为 100,000 credits 阈值停止，也不为降低 burn 主动取消普通 G2，以便取得预算评审样本。
 
 GMGN 使用单一加权队列，discovery 和 safety 优先。429 读取 reset 并暂停；异常响应不清空 TTL 内状态。
 
@@ -685,7 +675,7 @@ API key、Telegram token 和 Telegram destination binding 保存在服务器 `.e
 - GMGN safety 不可用：未知候选不得进入 CoinGecko；
 - Level 1 不可用：保持 qualified，不进入 armed；
 - G2 断线：窗口 incomplete，重连恢复；
-- credits 低水位：取消低优先候选，保留必要 Outcome；
+- production 总 burn 投影会在月末前耗尽：暂停低优先 REST、退出普通 Armed、停止新 G2 admission，保留必要 Outcome；Shadow 只延后低优先 REST，不主动取消普通 G2；
 - Telegram 失败：outbox 重试，不提前启动 Outcome；
 - SQLite 锁等可恢复预警：有界重试并在仍可写时通过 outbox 发 SYSTEM_ALERT；SQLite 完全不可写时不可能依赖同一 outbox 承诺 Telegram 告警，必须使健康检查失败并输出脱敏 stderr 高优先日志；
 - 服务器时钟偏差超过配置阈值：停止 production 确认和新的 Outcome 锚定，原始观察标记 timing invalid，恢复并重新满足 freshness 后才继续；

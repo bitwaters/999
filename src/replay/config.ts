@@ -27,13 +27,29 @@ export function loadReplayConfig(input: ReplayConfigInput): LoadedConfig {
     throw new Error('Replay requires current bot.yaml or a saved config version');
   if (input.savedConfigYaml && overrides.length === 0)
     throw new Error('Saved replay config requires explicit --set overrides');
-  const base = input.savedConfigYaml ?? input.currentBotYaml!;
+  const base = input.savedConfigYaml
+    ? removeLegacySavedConfigFields(input.savedConfigYaml)
+    : input.currentBotYaml!;
   const text = overrides.length === 0 ? base : applyOverrides(base, overrides);
   return parseConfigText(
     text,
     input.gitCwd,
     process.env.CONTAINERIZED_RUN === '1' ? process.env : undefined,
   );
+}
+
+function removeLegacySavedConfigFields(yamlText: string): string {
+  const parsed: unknown = YAML.parse(yamlText);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return yamlText;
+  const root = structuredClone(parsed) as Record<string, unknown>;
+  const providers = root.providers;
+  if (!providers || typeof providers !== 'object' || Array.isArray(providers)) return yamlText;
+  const coingecko = (providers as Record<string, unknown>).coingecko;
+  if (!coingecko || typeof coingecko !== 'object' || Array.isArray(coingecko)) return yamlText;
+  const g2 = (coingecko as Record<string, unknown>).g2;
+  if (!g2 || typeof g2 !== 'object' || Array.isArray(g2)) return yamlText;
+  delete (g2 as Record<string, unknown>).rolling_credits_per_message_upper_bound;
+  return YAML.stringify(root);
 }
 
 function applyOverrides(yamlText: string, overrides: readonly string[]): string {

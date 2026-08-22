@@ -342,6 +342,14 @@ export function g2ArmedLeaseState(
   return now - armedSince >= leaseSeconds * 1000 ? 'elapsed' : 'active';
 }
 
+export function retainG2SubscriptionDuringCreditPressure(
+  runMode: 'shadow' | 'production',
+  creditDeferred: boolean,
+  state: 'armed' | 'confirmed-pending-anchor',
+): boolean {
+  return runMode !== 'production' || !creditDeferred || state === 'confirmed-pending-anchor';
+}
+
 export function candidateRediscoveryState(input: {
   status: string;
   funnelStatus: string;
@@ -1791,9 +1799,23 @@ export class ProviderProbe {
       if (!canArmG2Candidate(row.status, row.funnel_status, attention.status)) continue;
       eligible.push({ row, pool, screening });
     }
+    const creditDeferred = this.coinGeckoScheduler.stats().creditDeferred;
+    const creditDemoted = existingArmed.filter(
+      ({ row }) =>
+        !retainG2SubscriptionDuringCreditPressure(
+          this.options.config.global.run_mode,
+          creditDeferred,
+          row.status === 'confirmed-pending-anchor' ? 'confirmed-pending-anchor' : 'armed',
+        ),
+    );
+    if (creditDemoted.length > 0)
+      this.demoteArmedForG2Capacity(creditDemoted, 'g2:credit_deferred');
+    const retainedForCredit = existingArmed.filter((item) => !creditDemoted.includes(item));
+    const eligibleForAdmission =
+      this.options.config.global.run_mode === 'production' && creditDeferred ? [] : eligible;
     const leaseNow = Date.now();
-    const waitingChains = new Set(eligible.map(({ row }) => row.chain));
-    const leaseElapsed = existingArmed.filter(({ row, pool }) => {
+    const waitingChains = new Set(eligibleForAdmission.map(({ row }) => row.chain));
+    const leaseElapsed = retainedForCredit.filter(({ row, pool }) => {
       const state = g2ArmedLeaseState(
         row.status,
         this.g2ArmedSince.get(pool.identityKey),
@@ -1804,8 +1826,8 @@ export class ProviderProbe {
       return state === 'elapsed' && waitingChains.has(row.chain);
     });
     if (leaseElapsed.length > 0) this.demoteArmedForG2Capacity(leaseElapsed, 'g2:lease_elapsed');
-    const retainedExisting = existingArmed.filter((item) => !leaseElapsed.includes(item));
-    if (eligible.length === 0 && retainedExisting.length === 0) {
+    const retainedExisting = retainedForCredit.filter((item) => !leaseElapsed.includes(item));
+    if (eligibleForAdmission.length === 0 && retainedExisting.length === 0) {
       if (this.g2Client) {
         const active = this.g2Client.active();
         for (const identityKey of armedSubscriptionsToRelease(active, new Set())) {
@@ -1840,7 +1862,7 @@ export class ProviderProbe {
     const finalistSortAt = Date.now();
     const finalistMaxWaitMs =
       this.options.config.providers.coingecko.scheduler.max_dynamic_wait_seconds * 1000;
-    eligible.sort((left, right) => {
+    eligibleForAdmission.sort((left, right) => {
       const leftWaitingSince =
         this.finalistWaitingSince.get(
           finalistKey({
@@ -1888,7 +1910,7 @@ export class ProviderProbe {
     const occupiedByChain = { sol: 0, bsc: 0 };
     for (const { row } of capacityPlan.retained) occupiedByChain[row.chain] += 1;
     const initializationJobs: Array<Promise<void>> = [];
-    for (const [index, item] of eligible.entries()) {
+    for (const [index, item] of eligibleForAdmission.entries()) {
       const identity = {
         chain: item.row.chain,
         tokenAddress: item.row.token_address,
@@ -1912,7 +1934,7 @@ export class ProviderProbe {
         identity,
         Date.now(),
         this.options.config.providers.coingecko.scheduler.reservation_ttl_seconds * 1000,
-        eligible.length - index,
+        eligibleForAdmission.length - index,
       );
       if (reservation.status === 'rejected_capacity') {
         this.recordSchedulerDecision({

@@ -156,7 +156,7 @@ REST 30 秒 OHLCV 从 anchor_delivered_at 立即开始，按 0–10m/10–30m/30
 以下问题只决定配置值或 production 放行时间，不改变本提案的能力契约和任务结构：
 
 - 私人 GMGN Key 的 RPM、并发、reset 与临时封禁边界。
-- CoinGecko 每个 G2 socket 的订阅上限、并发 socket 上限和真实 rolling credits per message。
+- CoinGecko 每个 G2 socket 的订阅上限、并发 socket 上限，以及 `/key` 总余额在活跃 G2 与 REST 并发时的实际 burn；供应商未提供分项账单，不声明 per-message G2 成本。
 - SOL/BSC 首版 S1 启用集合及已验证字段的量纲、方向和阈值。
 - 两链最低市值/reserve、年龄边界、buyers/net buy/buy share、Top1/Top3、overextension、TTL 与最大 Armed 数。
 - 新池索引延迟、缓存延迟、完整率、可执行率和预算满足 production 的人工评审结果。

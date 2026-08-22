@@ -16,7 +16,7 @@
 - [x] 3.1 实现共享有界 deadline-aware 优先队列与统一 token bucket；非紧急工作按确认、新候选批量、Armed 批量、普通复查、Outcome 排序，达到 latest-start 的确认或 Outcome 晋升最高优先级，并将 `/key` 实际上限与配置上限取较小值。（所有 CoinGecko REST 能力统一入队，含 `/key`、池解析、批量、初始化、确认和 Outcome）
 - [x] 3.2 实现 SOL/BSC 独立去重和任意数量的 50/50/余数切片；内存窗口外候选保持 SQLite due 并由后续循环重扫，输出同时覆盖已装载/未装载工作的 backlog、oldest-age 和各优先级计数。（边界测试覆盖 0/1/49/50/51/120；同池双目标只去重请求、不丢 Candidate）
 - [x] 3.3 实现批量池 10 秒内存 TTL、同能力 single-flight 和有界并发；只有真实供应商请求写一份 raw event，复用不得伪造新 observedAt。（缓存/在途复用不写供应商 raw 或伪造完成事件）
-- [x] 3.4 为确认与必要 Outcome 分别保留请求/RPM 和 monthly-credit 资源，实现 429/reset 退避、并发自动收敛、burn-rate/projected-exhaustion 保护；过载时先停止复查和新候选接纳，并测试 latest-start 防饿死。（无 100,000 人为阈值；credit defer 立即返回 SQLite due，避免队列自锁）
+- [x] 3.4 为确认与必要 Outcome 分别保留请求/RPM 和 monthly-credit 资源，实现 429/reset 退避、并发自动收敛、burn-rate/projected-exhaustion 保护；过载时先停止复查和新候选接纳，并测试 latest-start 防饿死。（无 100,000 人为阈值；credit defer 立即返回 SQLite due，避免队列自锁；供应商只有 Key 级总账单，因此删除未接入的 per-message 估算器，production 总 burn 超预算时退出普通 Armed、停止新 G2 admission 并保留 pending anchor，Shadow 只记录）
 - [x] 3.5 调度循环和进程启动均从现有 active candidates、signals/outbox/outcomes 重建/补装到期工作；停止时有界排空，不新增队列表或业务表。（10 秒重扫事实源，内存 reservation 重启清空，停止先关闭调度器）
 
 ## 4. 自适应 Level 1 路径

@@ -187,7 +187,6 @@ const providerSchema = z
             max_sockets: z.literal(1),
             max_subscriptions_per_socket: z.number().int().positive(),
             armed_lease_seconds: z.number().int().min(60).max(900),
-            rolling_credits_per_message_upper_bound: decimal,
           })
           .strict(),
       })

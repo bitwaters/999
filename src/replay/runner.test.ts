@@ -44,6 +44,20 @@ test('replay config accepts one clean source and explicit saved overrides only',
     worktreeStatus: '',
   });
   assert.equal(saved.config.replay.delivery_delay_ms, 2_500);
+  const legacySaved = configText.replace(
+    '      armed_lease_seconds: 120\n',
+    '      armed_lease_seconds: 120\n      rolling_credits_per_message_upper_bound: 10\n',
+  );
+  const migrated = loadReplayConfig({
+    savedConfigYaml: legacySaved,
+    overrides: ['replay.delivery_delay_ms=2500'],
+    worktreeStatus: '',
+  });
+  assert.equal(migrated.config.replay.delivery_delay_ms, 2_500);
+  assert.throws(
+    () => loadReplayConfig({ currentBotYaml: legacySaved, worktreeStatus: '' }),
+    /Unrecognized key/u,
+  );
   assert.throws(
     () =>
       loadReplayConfig({

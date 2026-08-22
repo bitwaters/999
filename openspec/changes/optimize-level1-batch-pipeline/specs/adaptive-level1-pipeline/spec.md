@@ -141,6 +141,8 @@
 
 系统 SHALL 以 `/key` 返回的 API-key RPM/月度额度为真实上限，并以集中配置作为更保守的本地上限；确认资源 MUST 保留，开发阶段不得重新引入“剩余低于 100,000 自动停止”的人为阈值。
 
+供应商只提供 Key 级总 credits、REST 与 G2 又并发时，系统 MUST 使用实际总 burn projection，不得从余额差分伪造 per-message G2 成本。production credit defer MUST 退出普通 Armed 并停止新 G2 admission，同时保留 confirmed-pending-anchor；Shadow MUST 记录该 burn，但不得为降低 burn 主动取消普通 G2。
+
 #### Scenario: 短时大量新候选进入
 
 - **WHEN** 候选批次可以在 RPM 内突发完成但按当前 burn rate 会突破月度预算或挤占确认保留量
@@ -150,6 +152,11 @@
 
 - **WHEN** 供应商报告的 API-key RPM 或月度额度低于配置值
 - **THEN** 系统立即采用更低的真实上限，不得继续按配置高值发请求
+
+#### Scenario: production G2 使总 burn projection 超预算
+
+- **WHEN** production 的实际总 burn projection 会在月末前耗尽 credits
+- **THEN** 系统退出普通 Armed、停止新 G2 admission 并保留 confirmed-pending-anchor；压力解除后只通过既有 Level 1 due/reservation 流程恢复
 
 ### Requirement: 优化必须可确定回放并按样本量验收
 

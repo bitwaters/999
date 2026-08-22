@@ -9,7 +9,7 @@ import {
   gmgnSecurityRawSchema,
   gmgnTrendingRawSchema,
 } from './raw-schemas.js';
-import { CreditMeter, WeightedRequestQueue } from './queue.js';
+import { WeightedRequestQueue } from './queue.js';
 
 test('parses independent GMGN capability shapes without coercing types', () => {
   assert.equal(
@@ -103,25 +103,11 @@ test('parses financial strings exactly and classifies conservative DataState', (
   assert.equal(classifyWindow({ present: true, valid: false }), 'invalid');
 });
 
-test('queues weighted work and blocks credits without assuming one message equals one credit', async () => {
+test('queues weighted work by priority and weight', async () => {
   const queue = new WeightedRequestQueue(0);
   const result = await Promise.all([
     queue.enqueue(async () => 'discovery', { weight: 1, priority: 1 }),
     queue.enqueue(async () => 'safety', { weight: 2, priority: 2 }),
   ]);
   assert.deepEqual(result, ['discovery', 'safety']);
-  const meter = new CreditMeter();
-  meter.record({
-    observedAt: 1,
-    remainingCredits: 100,
-    remainingMonthSeconds: 10,
-    creditsPerMessageUpperBound: 5,
-  });
-  assert.equal(meter.allowedMessagesPerSecond(), 2);
-  meter.recordMessageCost(10);
-  meter.recordMessageCost(20);
-  assert.equal(meter.rollingCreditsPerMessage(5), 15);
-  assert.equal(meter.allowedMessagesPerSecond(), 2 / 3);
-  assert.equal(meter.shouldPause('shadow', 100, 1), false);
-  assert.equal(meter.shouldPause('production', 2, 1), true);
 });

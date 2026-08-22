@@ -60,12 +60,12 @@
 - **THEN** 系统保留证据、标记 ambiguous duplicate，并令对应窗口 incomplete
 
 ### Requirement: 限流与 credits 必须按真实成本保护
-系统 SHALL 分别执行供应商限流，并用剩余 credits、剩余月份时间和保守 rolling credits per message 估计 G2 允许速率；无法得到可信单位成本时不得假设一条消息等于一个 credit。
+系统 SHALL 分别执行供应商限流，并用 `/key` 的真实月额度、已用额度、剩余月份时间和总 burn rate 投影保护 CoinGecko；REST 与 G2 并发且供应商不提供分项账单时不得从总余额差分伪造单条 G2 消息成本。
 
 #### Scenario: production burn rate 超标
-- **WHEN** 实际或保守估计 burn rate 超过配置预算
-- **THEN** 系统取消低优先订阅并优先保留必要 Outcome
+- **WHEN** `/key` 实际总 burn 投影会在月末前耗尽可用 credits
+- **THEN** 系统暂停低优先 REST、新 G2 admission 和普通 Armed 订阅，并保留 confirmed-pending-anchor 必要 Outcome
 
 #### Scenario: 开发持续采样
 - **WHEN** run mode 为开发或 Shadow 采样且没有供应商硬性限制
-- **THEN** 系统只记录余额和 burn rate，不因人为 100,000 credits 阈值自动停止
+- **THEN** 系统记录余额和 burn rate，不因人为 100,000 credits 阈值自动停止，也不为降低 burn 主动取消普通 G2

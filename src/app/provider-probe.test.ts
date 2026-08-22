@@ -185,11 +185,7 @@ test('unchanged scheduler waits deduplicate until a batch can run again', () => 
     'level1-wait:candidate_batch:sol:a,b',
   );
   assert.equal(
-    unchangedLevel1WaitDedupeKey(
-      'scheduler:backlog_high_watermark',
-      'recheck',
-      'bsc:0x1',
-    ),
+    unchangedLevel1WaitDedupeKey('scheduler:backlog_high_watermark', 'recheck', 'bsc:0x1'),
     'level1-wait:recheck:bsc:0x1',
   );
   assert.equal(

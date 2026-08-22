@@ -10,6 +10,7 @@ import {
   compareCoinGeckoWork,
   finalistKey,
   g2IdentityKey,
+  isCreditDeferredWork,
   type CoinGeckoWorkKind,
 } from './coingecko-scheduler.js';
 
@@ -57,6 +58,14 @@ test('deadline promotion outranks normal priority and aged recheck gains candida
       60_000,
     ) < 0,
   );
+});
+
+test('credit projection blocks only low-priority discovery work', () => {
+  assert.equal(isCreditDeferredWork('candidate_batch'), true);
+  assert.equal(isCreditDeferredWork('recheck'), true);
+  assert.equal(isCreditDeferredWork('armed_batch'), false);
+  assert.equal(isCreditDeferredWork('confirmation'), false);
+  assert.equal(isCreditDeferredWork('outcome'), false);
 });
 
 test('scheduler orders work, enforces request-type concurrency and single-flights keys', async () => {

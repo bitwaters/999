@@ -59,6 +59,7 @@ import {
   chunkCoinGeckoPools,
   finalistKey,
   g2IdentityKey,
+  isCreditDeferredWork,
   type CoinGeckoWork,
 } from '../providers/coingecko-scheduler.js';
 import { CoinGeckoG2Client, type G2ClientStatus } from '../providers/coingecko-g2.js';
@@ -417,6 +418,36 @@ type Level1CandidateRow = {
   funnel_status: string;
   updated_at: number;
 };
+
+function level1BatchContext(
+  chain: 'sol' | 'bsc',
+  rows: Level1CandidateRow[],
+  workKind: 'candidate_batch' | 'armed_batch' | 'recheck',
+  refreshSeconds: { recheck: number; active: Record<'sol' | 'bsc', number> },
+) {
+  const addresses = [
+    ...new Map(
+      rows.map((row) => [
+        chain === 'bsc' ? row.pool_address.toLowerCase() : row.pool_address,
+        row.pool_address,
+      ]),
+    ).values(),
+  ];
+  const cacheKey = `${chain}:${[...addresses]
+    .map((address) => (chain === 'bsc' ? address.toLowerCase() : address))
+    .sort()
+    .join(',')}`;
+  return {
+    addresses,
+    cacheKey,
+    decisionCandidates: rows.map((row) => ({
+      tokenAddress: row.token_address,
+      poolAddress: row.pool_address,
+      cycleStartedAt: row.cycle_started_at,
+      dueAt: level1WorkDueAt(row, workKind, refreshSeconds),
+    })),
+  };
+}
 
 export function selectLevel1CandidateRows(
   database: SqliteDatabase,
@@ -1485,14 +1516,15 @@ export class ProviderProbe {
         }
       }
       await delay(this.options.config.providers.coingecko.scheduler.merge_delay_ms);
-      const resolutionErrors = await this.resolveCoinGeckoPools(key);
+      const creditDeferred = this.coinGeckoScheduler.stats().creditDeferred;
+      const resolutionErrors = creditDeferred ? [] : await this.resolveCoinGeckoPools(key);
       const outcomes = this.processOutcomes(key).then(
         () => ({ status: 'fulfilled' as const }),
         (reason: unknown) => ({ status: 'rejected' as const, reason }),
       );
       let pipelineError: unknown;
       try {
-        await this.refreshLevel1(key);
+        await this.refreshLevel1(key, creditDeferred);
         await this.armEligibleCandidates(key);
       } catch (error) {
         pipelineError = error;
@@ -1511,7 +1543,7 @@ export class ProviderProbe {
     }
   }
 
-  private async refreshLevel1(key: string): Promise<void> {
+  private async refreshLevel1(key: string, creditDeferred: boolean): Promise<void> {
     const rows = selectLevel1CandidateRows(
       this.options.database,
       this.options.config.providers.coingecko.scheduler.max_due_pools_per_chain,
@@ -1542,6 +1574,30 @@ export class ProviderProbe {
           chain,
           this.options.config.providers.coingecko.max_pools_per_batch,
         )) {
+          if (creditDeferred && isCreditDeferredWork(workKind)) {
+            const { cacheKey, decisionCandidates } = level1BatchContext(
+              chain,
+              candidateRows,
+              workKind,
+              {
+                recheck: this.options.config.providers.coingecko.scheduler.dynamic_recheck_seconds,
+                active: {
+                  sol: this.options.config.chains.sol.level1.refresh_interval_seconds,
+                  bsc: this.options.config.chains.bsc.level1.refresh_interval_seconds,
+                },
+              },
+            );
+            this.recordSchedulerDecision({
+              decision: 'defer',
+              reason: 'scheduler:credit_deferred',
+              priority: workKind,
+              chain,
+              workKey: `pools.multi:${cacheKey}`,
+              candidates: decisionCandidates,
+              dedupeKey: `level1-wait:${workKind}:${cacheKey}`,
+            });
+            continue;
+          }
           batchJobs.push({
             expected: candidateRows.length,
             promise: this.refreshLevel1Batch(key, chain, candidateRows, workKind),
@@ -1582,31 +1638,19 @@ export class ProviderProbe {
     workKind: 'candidate_batch' | 'armed_batch' | 'recheck',
   ): Promise<{ attempted: number; complete: number }> {
     const network = chain === 'sol' ? 'solana' : 'bsc';
-    const addresses = [
-      ...new Map(
-        poolRows.map((row) => [
-          chain === 'bsc' ? row.pool_address.toLowerCase() : row.pool_address,
-          row.pool_address,
-        ]),
-      ).values(),
-    ];
-    const cacheKey = `${chain}:${[...addresses]
-      .map((address) => (chain === 'bsc' ? address.toLowerCase() : address))
-      .sort()
-      .join(',')}`;
-    const requestedAt = Date.now();
-    const decisionCandidates = poolRows.map((row) => ({
-      tokenAddress: row.token_address,
-      poolAddress: row.pool_address,
-      cycleStartedAt: row.cycle_started_at,
-      dueAt: level1WorkDueAt(row, workKind, {
+    const { addresses, cacheKey, decisionCandidates } = level1BatchContext(
+      chain,
+      poolRows,
+      workKind,
+      {
         recheck: this.options.config.providers.coingecko.scheduler.dynamic_recheck_seconds,
         active: {
           sol: this.options.config.chains.sol.level1.refresh_interval_seconds,
           bsc: this.options.config.chains.bsc.level1.refresh_interval_seconds,
         },
-      }),
-    }));
+      },
+    );
+    const requestedAt = Date.now();
     let supplierRequestStarted = false;
     const { parsed, observedAt } = await this.level1BatchCache
       .getOrLoad(
@@ -1827,8 +1871,7 @@ export class ProviderProbe {
     if (creditDemoted.length > 0)
       this.demoteArmedForG2Capacity(creditDemoted, 'g2:credit_deferred');
     const retainedForCredit = existingArmed.filter((item) => !creditDemoted.includes(item));
-    const eligibleForAdmission =
-      this.options.config.global.run_mode === 'production' && creditDeferred ? [] : eligible;
+    const eligibleForAdmission = creditDeferred ? [] : eligible;
     const leaseNow = Date.now();
     const waitingChains = new Set(eligibleForAdmission.map(({ row }) => row.chain));
     const leaseElapsed = retainedForCredit.filter(({ row, pool }) => {

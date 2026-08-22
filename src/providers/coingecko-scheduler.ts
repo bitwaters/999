@@ -64,6 +64,10 @@ export function reserveFor(kind: CoinGeckoWorkKind): CoinGeckoReserve {
   return 'shared';
 }
 
+export function isCreditDeferredWork(kind: CoinGeckoWorkKind): boolean {
+  return kind === 'candidate_batch' || kind === 'recheck';
+}
+
 export function compareCoinGeckoWork(
   left: Pick<PendingWork, 'kind' | 'createdAt' | 'deadlineAt' | 'sequence'>,
   right: Pick<PendingWork, 'kind' | 'createdAt' | 'deadlineAt' | 'sequence'>,
@@ -191,10 +195,7 @@ export class CoinGeckoRestScheduler {
     if (!this.accepting) return Promise.reject(new Error('scheduler:stopping'));
     const existing = this.pendingByKey.get(work.key);
     if (existing) return existing as Promise<T>;
-    if (
-      this.creditStatus(this.now()).deferred &&
-      (work.kind === 'candidate_batch' || work.kind === 'recheck')
-    ) {
+    if (this.creditStatus(this.now()).deferred && isCreditDeferredWork(work.kind)) {
       this.rejected += 1;
       return Promise.reject(new Error('scheduler:credit_deferred'));
     }
